@@ -1,0 +1,28 @@
+{
+  "name": "coordinator-agent",
+  "version": "1.0.0",
+  "description": "Coordinator agent for NEAR Shade Agent multi-agent coordination",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "DOTENV_CONFIG_PATH=.env.development.local tsx -r dotenv/config src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "docker:build": "sudo docker build --platform linux/amd64 -t yourusername/coordinator-agent:latest .",
+    "docker:build:no-cache": "sudo docker build --no-cache --platform linux/amd64 -t yourusername/coordinator-agent:latest .",
+    "docker:push": "sudo docker push yourusername/coordinator-agent",
+    "phala:deploy": "phala cvms create --name coordinator-agent --vcpu 1 --compose ./docker-compose.yaml --env-file ./.env.development.local"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.15.0",
+    "@neardefi/shade-agent-js": "^1.0.1",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "hono": "^4.8.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

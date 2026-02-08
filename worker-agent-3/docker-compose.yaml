@@ -1,0 +1,48 @@
+# Docker Compose configuration for Worker Agent 3
+# Following verifiable-ai-dao/docker-compose.yaml pattern
+
+services:
+  # Shade Agent API - handles TEE attestation and registration
+  shade-agent-api:
+    # Fixed image from verifiable-ai-dao
+    image: mattdlockyer/shade-agent-api@sha256:a86e3a4300b069c08d629a38d61a3d780f7992eaf36aa505e4527e466553e2e5
+    container_name: worker3-shade-agent-api
+    platform: linux/amd64
+    restart: always
+    volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
+    environment:
+      NEAR_ACCOUNT_ID: ${NEAR_ACCOUNT_ID}
+      NEAR_SEED_PHRASE: ${NEAR_SEED_PHRASE}
+      API_CODEHASH: ${API_CODEHASH}
+      APP_CODEHASH: ${APP_CODEHASH}
+      NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
+      NEAR_RPC_JSON: ${NEAR_RPC_JSON}
+
+  # Worker Agent 3 Application
+  worker-agent-3:
+    image: ${DOCKER_TAG}
+    container_name: worker-agent-3
+    platform: linux/amd64
+    restart: always
+    ports:
+      - "3003:3003"
+    volumes:
+      - /var/run/tappd.sock:/var/run/tappd.sock
+    environment:
+      # Worker configuration
+      WORKER_ID: ${WORKER_ID}
+      PORT: ${PORT}
+      # Ensue configuration
+      ENSUE_API_KEY: ${ENSUE_API_KEY}
+      ENSUE_TOKEN: ${ENSUE_TOKEN}
+      # NEAR configuration
+      NEAR_ACCOUNT_ID: ${NEAR_ACCOUNT_ID}
+      NEAR_SEED_PHRASE: ${NEAR_SEED_PHRASE}
+      NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
+      NEAR_RPC_JSON: ${NEAR_RPC_JSON}
+      # Shade Agent
+      API_CODEHASH: ${API_CODEHASH}
+      APP_CODEHASH: ${APP_CODEHASH}
+    depends_on:
+      - shade-agent-api

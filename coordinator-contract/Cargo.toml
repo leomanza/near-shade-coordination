@@ -1,0 +1,33 @@
+[package]
+name = "coordinator_contract"
+description = "NEAR Shade Agent Coordination Contract with Yield/Resume Pattern"
+version = "0.1.0"
+edition = "2021"
+authors = ["NEAR Shade Coordination Team"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# NEAR SDK - following verifiable-ai-dao pattern
+near-sdk = { version = "=5.17.2", features = ["schemars"] }
+schemars = { version = "0.8" }
+serde_json = "1.0.135"
+base64 = "0.22.1"
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+# For hash validation
+sha2 = "0.10.8"
+serde = "1.0.217"
+
+[dev-dependencies]
+near-sdk = { version = "=5.17.2", features = ["unit-testing"] }
+
+[profile.release]
+codegen-units = 1
+# Optimize for small code size
+opt-level = "z"
+lto = true
+debug = false
+panic = "abort"
+# Extra safety checks on arithmetic operations
+overflow-checks = true
