@@ -105,6 +105,43 @@ export async function localStartCoordination(taskConfig: string): Promise<number
 }
 
 /**
+ * Record worker submissions on-chain (nullifier pattern)
+ * Must be called after workers complete, before coordinator_resume
+ */
+export async function localRecordWorkerSubmissions(
+  proposalId: number,
+  submissions: Array<{ worker_id: string; result_hash: string }>
+): Promise<boolean> {
+  try {
+    nearCliCall('record_worker_submissions', {
+      proposal_id: proposalId,
+      submissions,
+    }, '100 Tgas');
+
+    console.log(`[CONTRACT] record_worker_submissions succeeded for proposal #${proposalId} (${submissions.length} workers)`);
+    return true;
+  } catch (error: any) {
+    const msg = error.message || '';
+    if (msg.includes('ETIMEDOUT') || msg.includes('timeout')) {
+      console.warn('[CONTRACT] record_worker_submissions CLI timed out, checking state...');
+      await new Promise(r => setTimeout(r, 3000));
+
+      // Verify by checking proposal state
+      const proposal = await localViewCall<any>('get_proposal', { proposal_id: proposalId });
+      if (proposal && proposal.state === 'WorkersCompleted') {
+        console.log(`[CONTRACT] record_worker_submissions verified - proposal #${proposalId} in WorkersCompleted state`);
+        return true;
+      }
+      console.error(`[CONTRACT] record_worker_submissions may have failed for proposal #${proposalId}`);
+      return false;
+    }
+
+    console.error(`[CONTRACT] record_worker_submissions failed:`, msg.substring(0, 200));
+    return false;
+  }
+}
+
+/**
  * Call coordinator_resume on the contract (settles on-chain)
  */
 export async function localCoordinatorResume(

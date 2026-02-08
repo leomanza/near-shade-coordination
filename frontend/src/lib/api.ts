@@ -147,29 +147,44 @@ async function nearViewCall<T>(method: string, args: Record<string, unknown> = {
   }
 }
 
+export type ProposalState = "Created" | "WorkersCompleted" | "Finalized" | "TimedOut";
+
+export interface WorkerSubmission {
+  worker_id: string;
+  result_hash: string;
+  timestamp: number;
+}
+
+export interface OnChainProposal {
+  task_config: string;
+  config_hash: string;
+  timestamp: number;
+  requester: string;
+  state: ProposalState;
+  worker_submissions: WorkerSubmission[];
+  finalized_result?: string;
+}
+
 export interface OnChainState {
   owner: string;
   currentProposalId: number;
-  pendingCount: number;
-  finalizedResults: Array<{ proposalId: number; result: string }>;
+  proposals: Array<{ proposalId: number; proposal: OnChainProposal }>;
 }
 
 export async function getOnChainState(): Promise<OnChainState | null> {
   try {
-    const [owner, proposalId, pending, finalized] = await Promise.all([
+    const [owner, proposalId, allProposals] = await Promise.all([
       nearViewCall<string>("get_owner"),
       nearViewCall<number>("get_current_proposal_id"),
-      nearViewCall<Array<[number, unknown]>>("get_pending_coordinations"),
-      nearViewCall<Array<[number, string]>>("get_all_finalized_coordinations"),
+      nearViewCall<Array<[number, OnChainProposal]>>("get_all_proposals"),
     ]);
     if (owner === null || proposalId === null) return null;
     return {
       owner,
       currentProposalId: proposalId,
-      pendingCount: pending?.length ?? 0,
-      finalizedResults: (finalized ?? []).map(([id, result]) => ({
+      proposals: (allProposals ?? []).map(([id, proposal]) => ({
         proposalId: id,
-        result,
+        proposal,
       })),
     };
   } catch {

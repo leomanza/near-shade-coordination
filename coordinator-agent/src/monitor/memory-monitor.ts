@@ -13,6 +13,7 @@ import crypto from 'crypto';
 import {
   localStartCoordination,
   localCoordinatorResume,
+  localRecordWorkerSubmissions,
 } from '../contract/local-contract';
 
 const LOCAL_MODE = process.env.LOCAL_MODE === 'true';
@@ -101,7 +102,40 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
       return null;
     }
 
-    // Step 5: Aggregate results
+    // Step 5: Record worker submissions on-chain (nullifier)
+    if (proposalId !== null) {
+      await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'recording_submissions');
+      console.log('[LOCAL] Recording worker submissions on-chain...');
+
+      const resultKeys = getAllWorkerResultKeys();
+      const workerResults = await getEnsueClient().readMultiple(resultKeys);
+      const submissions = resultKeys
+        .map(key => {
+          const resultStr = workerResults[key];
+          if (!resultStr) return null;
+          try {
+            const result = JSON.parse(resultStr);
+            return {
+              worker_id: result.workerId as string,
+              result_hash: crypto.createHash('sha256').update(resultStr).digest('hex'),
+            };
+          } catch { return null; }
+        })
+        .filter((s): s is { worker_id: string; result_hash: string } => s !== null);
+
+      try {
+        const recorded = await localRecordWorkerSubmissions(proposalId, submissions);
+        if (recorded) {
+          console.log(`[LOCAL] Worker submissions recorded on-chain for proposal #${proposalId}`);
+        } else {
+          console.warn('[LOCAL] Failed to record worker submissions, continuing...');
+        }
+      } catch (err) {
+        console.warn('[LOCAL] record_worker_submissions failed:', err);
+      }
+    }
+
+    // Step 6: Aggregate results
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'aggregating');
     const tally = await aggregateResults(proposalId ?? 0);
 
@@ -109,7 +143,7 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_TALLY, JSON.stringify(tally));
     console.log('\n[LOCAL] Aggregation complete:', JSON.stringify(tally, null, 2));
 
-    // Step 6: Resume contract with on-chain settlement (privacy-preserving)
+    // Step 7: Resume contract with on-chain settlement (privacy-preserving)
     if (proposalId !== null) {
       await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'resuming');
       const onChainResult = JSON.stringify({
@@ -229,6 +263,34 @@ async function processCoordination(
       await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'failed');
       return;
     }
+
+    // Record worker submissions on-chain (nullifier)
+    await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'recording_submissions');
+    console.log('Recording worker submissions on-chain...');
+
+    const resultKeys = getAllWorkerResultKeys();
+    const workerResults = await getEnsueClient().readMultiple(resultKeys);
+    const submissions = resultKeys
+      .map(key => {
+        const resultStr = workerResults[key];
+        if (!resultStr) return null;
+        try {
+          const result = JSON.parse(resultStr);
+          return {
+            worker_id: result.workerId as string,
+            result_hash: crypto.createHash('sha256').update(resultStr).digest('hex'),
+          };
+        } catch { return null; }
+      })
+      .filter((s): s is { worker_id: string; result_hash: string } => s !== null);
+
+    // Production path: use shade-agent-js for contract call
+    const { agentCall } = await import('@neardefi/shade-agent-js');
+    await agentCall({
+      methodName: 'record_worker_submissions',
+      args: { proposal_id: proposalId, submissions },
+    });
+    console.log(`Worker submissions recorded on-chain for proposal #${proposalId}`);
 
     // Update status to aggregating
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'aggregating');

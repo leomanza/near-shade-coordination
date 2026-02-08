@@ -18,8 +18,17 @@ const YIELD_REGISTER: u64 = 0;
 pub enum StorageKey {
     ApprovedCodehashes,
     CoordinatorByAccountId,
-    PendingCoordinations,
-    FinalizedCoordinations,
+    Proposals,
+}
+
+/// Proposal lifecycle states
+#[near(serializers = [json, borsh])]
+#[derive(Clone, PartialEq, Debug)]
+pub enum ProposalState {
+    Created,          // Yield created, waiting for workers
+    WorkersCompleted, // All worker submissions recorded on-chain
+    Finalized,        // Aggregated result settled on-chain
+    TimedOut,         // Yield timed out before resolution
 }
 
 /// Worker/coordinator registration information
@@ -30,15 +39,35 @@ pub struct Worker {
     pub codehash: String,
 }
 
-/// Coordination request stored while yielded
+/// Input format for recording worker submissions
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
-pub struct CoordinationRequest {
+pub struct WorkerSubmissionInput {
+    pub worker_id: String,
+    pub result_hash: String,
+}
+
+/// On-chain record of a worker's submission (with timestamp)
+#[near(serializers = [json, borsh])]
+#[derive(Clone)]
+pub struct WorkerSubmission {
+    pub worker_id: String,
+    pub result_hash: String,
+    pub timestamp: u64,
+}
+
+/// Unified proposal struct with full lifecycle tracking
+#[near(serializers = [json, borsh])]
+#[derive(Clone)]
+pub struct Proposal {
     pub yield_id: CryptoHash,
     pub task_config: String,
     pub config_hash: String,
     pub timestamp: u64,
     pub requester: AccountId,
+    pub state: ProposalState,
+    pub worker_submissions: Vec<WorkerSubmission>,
+    pub finalized_result: Option<String>,
 }
 
 /// Main contract state
@@ -49,8 +78,7 @@ pub struct CoordinatorContract {
     pub approved_codehashes: IterableSet<String>,
     pub coordinator_by_account_id: IterableMap<AccountId, Worker>,
     pub current_proposal_id: u64,
-    pub pending_coordinations: IterableMap<u64, CoordinationRequest>,
-    pub finalized_coordinations: IterableMap<u64, String>,
+    pub proposals: IterableMap<u64, Proposal>,
 }
 
 #[near]
@@ -64,14 +92,12 @@ impl CoordinatorContract {
             approved_codehashes: IterableSet::new(StorageKey::ApprovedCodehashes),
             coordinator_by_account_id: IterableMap::new(StorageKey::CoordinatorByAccountId),
             current_proposal_id: 0,
-            pending_coordinations: IterableMap::new(StorageKey::PendingCoordinations),
-            finalized_coordinations: IterableMap::new(StorageKey::FinalizedCoordinations),
+            proposals: IterableMap::new(StorageKey::Proposals),
         }
     }
 
     /// Start a new coordination task
     /// Creates a yielded promise that will be resumed by the coordinator agent
-    /// Following verifiable-ai-dao/contract/src/dao.rs create_proposal pattern
     pub fn start_coordination(&mut self, task_config: String) -> u64 {
         require!(
             task_config.len() <= 10000,
@@ -85,8 +111,6 @@ impl CoordinatorContract {
         let config_hash = hash(&task_config);
 
         // Create yielded promise with callback
-        // Note: we do NOT promise_return this - the caller gets proposal_id immediately
-        // The yield runs in the background and resolves when coordinator_resume is called
         let _yielded_promise = env::promise_yield_create(
             "return_coordination_result",
             &json!({
@@ -106,27 +130,79 @@ impl CoordinatorContract {
             .try_into()
             .expect("conversion to CryptoHash failed");
 
-        // Store pending coordination with yield_id
-        let request = CoordinationRequest {
+        // Store proposal with Created state
+        let proposal = Proposal {
             yield_id,
             task_config,
             config_hash: config_hash.clone(),
             timestamp,
             requester,
+            state: ProposalState::Created,
+            worker_submissions: Vec::new(),
+            finalized_result: None,
         };
-        self.pending_coordinations.insert(proposal_id, request);
+        self.proposals.insert(proposal_id, proposal);
 
         env::log_str(&format!(
-            "Created coordination #{} with config_hash: {}",
+            "Created proposal #{} with config_hash: {}",
             proposal_id, config_hash
         ));
 
-        // Return proposal_id immediately (yield resolves in background)
         proposal_id
     }
 
+    /// Record worker submissions on-chain (nullifier pattern)
+    /// Called by the coordinator agent after workers complete, before aggregation
+    /// Each worker can only submit once per proposal (prevents double-spending)
+    pub fn record_worker_submissions(
+        &mut self,
+        proposal_id: u64,
+        submissions: Vec<WorkerSubmissionInput>,
+    ) {
+        self.require_approved_codehash();
+
+        let proposal = self
+            .proposals
+            .get_mut(&proposal_id)
+            .expect("No proposal with this ID");
+
+        require!(
+            proposal.state == ProposalState::Created,
+            "Proposal not in Created state - cannot record submissions"
+        );
+
+        for sub in submissions {
+            // NULLIFIER: reject if this worker already submitted for this proposal
+            let already = proposal
+                .worker_submissions
+                .iter()
+                .any(|s| s.worker_id == sub.worker_id);
+            require!(
+                !already,
+                format!(
+                    "Worker {} already submitted for proposal #{}",
+                    sub.worker_id, proposal_id
+                )
+            );
+
+            proposal.worker_submissions.push(WorkerSubmission {
+                worker_id: sub.worker_id,
+                result_hash: sub.result_hash,
+                timestamp: env::block_timestamp(),
+            });
+        }
+
+        proposal.state = ProposalState::WorkersCompleted;
+
+        env::log_str(&format!(
+            "Recorded {} worker submissions for proposal #{}",
+            proposal.worker_submissions.len(),
+            proposal_id
+        ));
+    }
+
     /// Resume a coordination task with aggregated results
-    /// Called by the coordinator agent after all workers complete
+    /// Called by the coordinator agent after recording worker submissions
     pub fn coordinator_resume(
         &mut self,
         proposal_id: u64,
@@ -136,14 +212,19 @@ impl CoordinatorContract {
     ) {
         self.require_approved_codehash();
 
-        let request = self
-            .pending_coordinations
+        let proposal = self
+            .proposals
             .get(&proposal_id)
-            .expect("No pending coordination with this ID");
+            .expect("No proposal with this ID");
+
+        require!(
+            proposal.state == ProposalState::WorkersCompleted,
+            "Proposal not in WorkersCompleted state - record worker submissions first"
+        );
 
         // Validate config hash (prevents config tampering during execution)
         require!(
-            request.config_hash == config_hash,
+            proposal.config_hash == config_hash,
             "Config hash mismatch - configuration was tampered with"
         );
 
@@ -162,13 +243,12 @@ impl CoordinatorContract {
 
         // Resume the yielded promise with the aggregated result
         env::promise_yield_resume(
-            &request.yield_id,
+            &proposal.yield_id,
             &serde_json::to_vec(&aggregated_result).unwrap(),
         );
     }
 
     /// Callback function when coordination yield is resumed
-    /// Following verifiable-ai-dao/contract/src/dao.rs return_external_response pattern
     #[private]
     pub fn return_coordination_result(
         &mut self,
@@ -177,24 +257,32 @@ impl CoordinatorContract {
         #[callback_result] response: Result<String, PromiseError>,
     ) -> PromiseOrValue<String> {
         let _ = task_config; // unused but needed for JSON deserialization matching
-        self.pending_coordinations.remove(&proposal_id);
 
         match response {
             Ok(result) => {
                 env::log_str(&format!(
-                    "Coordination #{} completed successfully. Result stored.",
+                    "Proposal #{} finalized successfully.",
                     proposal_id
                 ));
 
-                self.finalized_coordinations.insert(proposal_id, result.clone());
+                // Update proposal to Finalized state with result
+                if let Some(proposal) = self.proposals.get_mut(&proposal_id) {
+                    proposal.state = ProposalState::Finalized;
+                    proposal.finalized_result = Some(result.clone());
+                }
 
                 PromiseOrValue::Value(result)
             }
             Err(_) => {
                 env::log_str(&format!(
-                    "Coordination #{} failed or timed out",
+                    "Proposal #{} timed out",
                     proposal_id
                 ));
+
+                // Update proposal to TimedOut state
+                if let Some(proposal) = self.proposals.get_mut(&proposal_id) {
+                    proposal.state = ProposalState::TimedOut;
+                }
 
                 let promise = Promise::new(env::current_account_id()).function_call(
                     "fail_on_timeout".to_string(),
@@ -215,42 +303,88 @@ impl CoordinatorContract {
 
     // ========== VIEW FUNCTIONS ==========
 
-    /// Get all pending coordinations (for coordinator agent polling)
+    /// Get a single proposal by ID
+    pub fn get_proposal(&self, proposal_id: u64) -> Option<Proposal> {
+        self.proposals.get(&proposal_id).cloned()
+    }
+
+    /// Get all proposals with pagination
+    pub fn get_all_proposals(
+        &self,
+        from_index: &Option<u64>,
+        limit: &Option<u64>,
+    ) -> Vec<(u64, Proposal)> {
+        let from = from_index.unwrap_or(0);
+        let limit = limit.unwrap_or(self.proposals.len() as u64);
+
+        self.proposals
+            .iter()
+            .filter(|(id, _)| **id >= from)
+            .take(limit as usize)
+            .map(|(id, proposal)| (*id, proposal.clone()))
+            .collect()
+    }
+
+    /// Get proposals filtered by state
+    pub fn get_proposals_by_state(
+        &self,
+        state: ProposalState,
+        from_index: &Option<u64>,
+        limit: &Option<u64>,
+    ) -> Vec<(u64, Proposal)> {
+        let from = from_index.unwrap_or(0);
+        let limit = limit.unwrap_or(self.proposals.len() as u64);
+
+        self.proposals
+            .iter()
+            .filter(|(id, p)| **id >= from && p.state == state)
+            .take(limit as usize)
+            .map(|(id, proposal)| (*id, proposal.clone()))
+            .collect()
+    }
+
+    /// Get worker submissions for a specific proposal
+    pub fn get_worker_submissions(&self, proposal_id: u64) -> Vec<WorkerSubmission> {
+        self.proposals
+            .get(&proposal_id)
+            .map(|p| p.worker_submissions.clone())
+            .unwrap_or_default()
+    }
+
+    /// Backwards-compatible: get pending coordinations (Created state)
     pub fn get_pending_coordinations(
         &self,
         from_index: &Option<u64>,
         limit: &Option<u64>,
-    ) -> Vec<(u64, CoordinationRequest)> {
-        let from = from_index.unwrap_or(0);
-        let limit = limit.unwrap_or(self.pending_coordinations.len() as u64);
-
-        self.pending_coordinations
-            .iter()
-            .filter(|(id, _)| **id >= from)
-            .take(limit as usize)
-            .map(|(id, request)| (*id, request.clone()))
-            .collect()
+    ) -> Vec<(u64, Proposal)> {
+        self.get_proposals_by_state(ProposalState::Created, from_index, limit)
     }
 
-    /// Get a specific finalized coordination result
+    /// Backwards-compatible: get a finalized coordination result
     pub fn get_finalized_coordination(&self, proposal_id: u64) -> Option<String> {
-        self.finalized_coordinations.get(&proposal_id).cloned()
+        self.proposals.get(&proposal_id).and_then(|p| {
+            if p.state == ProposalState::Finalized {
+                p.finalized_result.clone()
+            } else {
+                None
+            }
+        })
     }
 
-    /// Get all finalized coordinations
+    /// Backwards-compatible: get all finalized coordinations
     pub fn get_all_finalized_coordinations(
         &self,
         from_index: &Option<u64>,
         limit: &Option<u64>,
     ) -> Vec<(u64, String)> {
         let from = from_index.unwrap_or(0);
-        let limit = limit.unwrap_or(self.finalized_coordinations.len() as u64);
+        let limit = limit.unwrap_or(self.proposals.len() as u64);
 
-        self.finalized_coordinations
+        self.proposals
             .iter()
-            .filter(|(id, _)| **id >= from)
+            .filter(|(id, p)| **id >= from && p.state == ProposalState::Finalized)
             .take(limit as usize)
-            .map(|(id, result)| (*id, result.clone()))
+            .filter_map(|(id, p)| p.finalized_result.clone().map(|r| (*id, r)))
             .collect()
     }
 
@@ -274,8 +408,6 @@ impl CoordinatorContract {
     }
 
     /// Register a coordinator agent
-    /// For MVP on testnet: accepts checksum, uses placeholder codehash verification
-    /// In production: would verify DCAP TEE attestation quote
     pub fn register_coordinator(&mut self, checksum: String, codehash: String) {
         self.require_owner();
 
@@ -311,11 +443,11 @@ impl CoordinatorContract {
         self.approved_codehashes.contains(&codehash)
     }
 
-    /// Remove a stale pending coordination (e.g. after failed yield timeout)
-    pub fn clear_pending_coordination(&mut self, proposal_id: u64) {
+    /// Remove a stale proposal (e.g. after failed yield timeout)
+    pub fn clear_proposal(&mut self, proposal_id: u64) {
         self.require_owner();
-        self.pending_coordinations.remove(&proposal_id);
-        env::log_str(&format!("Cleared stale pending coordination #{}", proposal_id));
+        self.proposals.remove(&proposal_id);
+        env::log_str(&format!("Cleared proposal #{}", proposal_id));
     }
 
     /// Transfer contract ownership
@@ -415,5 +547,15 @@ mod tests {
         let data = "test data";
         let result = hash(data);
         assert_eq!(result.len(), 64); // SHA256 produces 64 hex characters
+    }
+
+    #[test]
+    fn test_get_all_proposals_empty() {
+        let context = get_context(accounts(0));
+        testing_env!(context.build());
+
+        let contract = CoordinatorContract::new(accounts(0));
+        let proposals = contract.get_all_proposals(&None, &None);
+        assert_eq!(proposals.len(), 0);
     }
 }
