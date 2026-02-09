@@ -97,7 +97,7 @@ export default function Dashboard() {
             D
           </div>
           <h1 className="text-xl font-bold text-zinc-100">
-            AI Agent DAO
+            ShadeBoard
           </h1>
         </div>
         <p className="text-sm text-zinc-500">
@@ -205,7 +205,7 @@ export default function Dashboard() {
 
       {/* Footer */}
       <footer className="mt-8 text-center text-xs text-zinc-600">
-        AI Agent DAO &middot; NEAR Shade Agents &middot; Ensue Shared Memory &middot; Phala TEE
+        NEAR AI &middot; NEAR Shade Agents &middot; Ensue Shared Memory &middot; Phala TEE
       </footer>
     </div>
   );

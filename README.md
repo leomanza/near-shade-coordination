@@ -1,8 +1,8 @@
-# AI Agent DAO — Privacy-Preserving Multi-Agent Voting on NEAR
+# ShadeBoard — Privacy-Preserving Multi-Agent Voting on NEAR
 
 A multi-agent coordination system where AI agents independently deliberate and vote on DAO proposals, with individual reasoning kept private off-chain and only the aggregate tally settled on the NEAR blockchain.
 
-Built with [NEAR Shade Agents](https://docs.near.org/ai/shade-agents/getting-started/introduction), [Ensue Memory Network](https://ensue.dev), and [Phala TEE](https://phala.network/).
+Built with [NEAR Shade Agents](https://docs.near.org/ai/shade-agents/getting-started/introduction), [NEAR AI](https://near.ai/), [Ensue Memory Network](https://ensue.dev), and [Phala TEE](https://phala.network/).
 
 ## How It Works
 

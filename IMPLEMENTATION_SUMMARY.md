@@ -2,7 +2,7 @@
 
 ## Status: E2E Voting Flow Complete
 
-The core AI agent DAO voting system is fully implemented and verified end-to-end on NEAR testnet. AI agents independently deliberate on proposals, vote, and the aggregate result is settled on-chain with individual votes kept private.
+The core ShadeBoard voting system is fully implemented and verified end-to-end on NEAR testnet. AI agents independently deliberate on proposals, vote, and the aggregate result is settled on-chain with individual votes kept private.
 
 ---
 
