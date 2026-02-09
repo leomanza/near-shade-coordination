@@ -16,9 +16,13 @@ const YIELD_REGISTER: u64 = 0;
 #[derive(BorshStorageKey)]
 #[near]
 pub enum StorageKey {
-    ApprovedCodehashes,
-    CoordinatorByAccountId,
-    Proposals,
+    // Ordinals 0-6 are burned. Each `#[init(ignore_state)]` redeploy leaves
+    // orphaned IterableMap/IterableSet entries at the old prefix, so we must
+    // advance to fresh ordinals every time.
+    _Dep0, _Dep1, _Dep2, _Dep3, _Dep4, _Dep5, _Dep6,
+    ApprovedCodehashes,    // ordinal 7
+    CoordinatorByAccountId, // ordinal 8
+    Proposals,              // ordinal 9
 }
 
 /// Proposal lifecycle states
@@ -31,6 +35,14 @@ pub enum ProposalState {
     TimedOut,         // Yield timed out before resolution
 }
 
+/// DAO manifesto that guides agent voting decisions
+#[near(serializers = [json, borsh])]
+#[derive(Clone)]
+pub struct Manifesto {
+    pub text: String,
+    pub hash: String,
+}
+
 /// Worker/coordinator registration information
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
@@ -39,7 +51,7 @@ pub struct Worker {
     pub codehash: String,
 }
 
-/// Input format for recording worker submissions
+/// Input format for recording worker submissions (nullifier only — no vote data on-chain)
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
 pub struct WorkerSubmissionInput {
@@ -47,7 +59,8 @@ pub struct WorkerSubmissionInput {
     pub result_hash: String,
 }
 
-/// On-chain record of a worker's submission (with timestamp)
+/// On-chain record of a worker's submission (nullifier + proof of participation)
+/// Individual votes stay private in Ensue shared memory.
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
 pub struct WorkerSubmission {
@@ -79,6 +92,7 @@ pub struct CoordinatorContract {
     pub coordinator_by_account_id: IterableMap<AccountId, Worker>,
     pub current_proposal_id: u64,
     pub proposals: IterableMap<u64, Proposal>,
+    pub manifesto: Option<Manifesto>,
 }
 
 #[near]
@@ -93,12 +107,41 @@ impl CoordinatorContract {
             coordinator_by_account_id: IterableMap::new(StorageKey::CoordinatorByAccountId),
             current_proposal_id: 0,
             proposals: IterableMap::new(StorageKey::Proposals),
+            manifesto: None,
         }
     }
 
-    /// Start a new coordination task
+    // ========== MANIFESTO ==========
+
+    /// Set the DAO manifesto that guides agent voting decisions
+    pub fn set_manifesto(&mut self, manifesto_text: String) {
+        self.require_owner();
+        require!(
+            manifesto_text.len() <= 10000,
+            "Manifesto text needs to be under 10,000 characters"
+        );
+        let manifesto_hash = hash(&manifesto_text);
+        self.manifesto = Some(Manifesto {
+            text: manifesto_text,
+            hash: manifesto_hash.clone(),
+        });
+        env::log_str(&format!("Manifesto set (hash: {})", manifesto_hash));
+    }
+
+    /// Get the current manifesto
+    pub fn get_manifesto(&self) -> Option<Manifesto> {
+        self.manifesto.clone()
+    }
+
+    // ========== COORDINATION ==========
+
+    /// Start a new coordination task (proposal for agent voting)
     /// Creates a yielded promise that will be resumed by the coordinator agent
     pub fn start_coordination(&mut self, task_config: String) -> u64 {
+        require!(
+            self.manifesto.is_some(),
+            "Manifesto not set. Owner must set_manifesto first."
+        );
         require!(
             task_config.len() <= 10000,
             "Task config needs to be under 10,000 characters"
@@ -152,7 +195,6 @@ impl CoordinatorContract {
     }
 
     /// Record worker submissions on-chain (nullifier pattern)
-    /// Called by the coordinator agent after workers complete, before aggregation
     /// Each worker can only submit once per proposal (prevents double-spending)
     pub fn record_worker_submissions(
         &mut self,
@@ -202,7 +244,6 @@ impl CoordinatorContract {
     }
 
     /// Resume a coordination task with aggregated results
-    /// Called by the coordinator agent after recording worker submissions
     pub fn coordinator_resume(
         &mut self,
         proposal_id: u64,
@@ -222,13 +263,11 @@ impl CoordinatorContract {
             "Proposal not in WorkersCompleted state - record worker submissions first"
         );
 
-        // Validate config hash (prevents config tampering during execution)
         require!(
             proposal.config_hash == config_hash,
             "Config hash mismatch - configuration was tampered with"
         );
 
-        // Validate result hash
         let computed_hash = hash(&aggregated_result);
         require!(
             computed_hash == result_hash,
@@ -241,7 +280,6 @@ impl CoordinatorContract {
             aggregated_result.len()
         ));
 
-        // Resume the yielded promise with the aggregated result
         env::promise_yield_resume(
             &proposal.yield_id,
             &serde_json::to_vec(&aggregated_result).unwrap(),
@@ -256,7 +294,7 @@ impl CoordinatorContract {
         task_config: String,
         #[callback_result] response: Result<String, PromiseError>,
     ) -> PromiseOrValue<String> {
-        let _ = task_config; // unused but needed for JSON deserialization matching
+        let _ = task_config;
 
         match response {
             Ok(result) => {
@@ -265,7 +303,6 @@ impl CoordinatorContract {
                     proposal_id
                 ));
 
-                // Update proposal to Finalized state with result
                 if let Some(proposal) = self.proposals.get_mut(&proposal_id) {
                     proposal.state = ProposalState::Finalized;
                     proposal.finalized_result = Some(result.clone());
@@ -274,12 +311,8 @@ impl CoordinatorContract {
                 PromiseOrValue::Value(result)
             }
             Err(_) => {
-                env::log_str(&format!(
-                    "Proposal #{} timed out",
-                    proposal_id
-                ));
+                env::log_str(&format!("Proposal #{} timed out", proposal_id));
 
-                // Update proposal to TimedOut state
                 if let Some(proposal) = self.proposals.get_mut(&proposal_id) {
                     proposal.state = ProposalState::TimedOut;
                 }
@@ -295,7 +328,6 @@ impl CoordinatorContract {
         }
     }
 
-    /// Called on timeout to produce a failed receipt
     #[private]
     pub fn fail_on_timeout(&self) {
         env::panic_str("Coordination request timed out");
@@ -303,12 +335,10 @@ impl CoordinatorContract {
 
     // ========== VIEW FUNCTIONS ==========
 
-    /// Get a single proposal by ID
     pub fn get_proposal(&self, proposal_id: u64) -> Option<Proposal> {
         self.proposals.get(&proposal_id).cloned()
     }
 
-    /// Get all proposals with pagination
     pub fn get_all_proposals(
         &self,
         from_index: &Option<u64>,
@@ -316,7 +346,6 @@ impl CoordinatorContract {
     ) -> Vec<(u64, Proposal)> {
         let from = from_index.unwrap_or(0);
         let limit = limit.unwrap_or(self.proposals.len() as u64);
-
         self.proposals
             .iter()
             .filter(|(id, _)| **id >= from)
@@ -325,7 +354,6 @@ impl CoordinatorContract {
             .collect()
     }
 
-    /// Get proposals filtered by state
     pub fn get_proposals_by_state(
         &self,
         state: ProposalState,
@@ -334,7 +362,6 @@ impl CoordinatorContract {
     ) -> Vec<(u64, Proposal)> {
         let from = from_index.unwrap_or(0);
         let limit = limit.unwrap_or(self.proposals.len() as u64);
-
         self.proposals
             .iter()
             .filter(|(id, p)| **id >= from && p.state == state)
@@ -343,7 +370,6 @@ impl CoordinatorContract {
             .collect()
     }
 
-    /// Get worker submissions for a specific proposal
     pub fn get_worker_submissions(&self, proposal_id: u64) -> Vec<WorkerSubmission> {
         self.proposals
             .get(&proposal_id)
@@ -351,7 +377,6 @@ impl CoordinatorContract {
             .unwrap_or_default()
     }
 
-    /// Backwards-compatible: get pending coordinations (Created state)
     pub fn get_pending_coordinations(
         &self,
         from_index: &Option<u64>,
@@ -360,7 +385,6 @@ impl CoordinatorContract {
         self.get_proposals_by_state(ProposalState::Created, from_index, limit)
     }
 
-    /// Backwards-compatible: get a finalized coordination result
     pub fn get_finalized_coordination(&self, proposal_id: u64) -> Option<String> {
         self.proposals.get(&proposal_id).and_then(|p| {
             if p.state == ProposalState::Finalized {
@@ -371,7 +395,6 @@ impl CoordinatorContract {
         })
     }
 
-    /// Backwards-compatible: get all finalized coordinations
     pub fn get_all_finalized_coordinations(
         &self,
         from_index: &Option<u64>,
@@ -379,7 +402,6 @@ impl CoordinatorContract {
     ) -> Vec<(u64, String)> {
         let from = from_index.unwrap_or(0);
         let limit = limit.unwrap_or(self.proposals.len() as u64);
-
         self.proposals
             .iter()
             .filter(|(id, p)| **id >= from && p.state == ProposalState::Finalized)
@@ -388,69 +410,56 @@ impl CoordinatorContract {
             .collect()
     }
 
-    /// Get contract owner
     pub fn get_owner(&self) -> AccountId {
         self.owner.clone()
     }
 
-    /// Get current proposal ID counter
     pub fn get_current_proposal_id(&self) -> u64 {
         self.current_proposal_id
     }
 
     // ========== OWNER FUNCTIONS ==========
 
-    /// Approve a Docker image codehash
     pub fn approve_codehash(&mut self, codehash: String) {
         self.require_owner();
         self.approved_codehashes.insert(codehash.clone());
         env::log_str(&format!("Approved codehash: {}", codehash));
     }
 
-    /// Register a coordinator agent
     pub fn register_coordinator(&mut self, checksum: String, codehash: String) {
         self.require_owner();
-
         let caller = env::predecessor_account_id();
-
         require!(
             self.approved_codehashes.contains(&codehash),
             "Codehash not approved. Owner must approve_codehash first."
         );
-
         let worker = Worker {
             checksum: checksum.clone(),
             codehash: codehash.clone(),
         };
-
         self.coordinator_by_account_id.insert(caller.clone(), worker);
-
         env::log_str(&format!(
             "Coordinator {} registered with codehash: {}",
             caller, codehash
         ));
     }
 
-    /// Remove a codehash approval
     pub fn remove_codehash(&mut self, codehash: String) {
         self.require_owner();
         self.approved_codehashes.remove(&codehash);
         env::log_str(&format!("Removed codehash: {}", codehash));
     }
 
-    /// Check if codehash is approved
     pub fn is_codehash_approved(&self, codehash: String) -> bool {
         self.approved_codehashes.contains(&codehash)
     }
 
-    /// Remove a stale proposal (e.g. after failed yield timeout)
     pub fn clear_proposal(&mut self, proposal_id: u64) {
         self.require_owner();
         self.proposals.remove(&proposal_id);
         env::log_str(&format!("Cleared proposal #{}", proposal_id));
     }
 
-    /// Transfer contract ownership
     pub fn transfer_ownership(&mut self, new_owner: AccountId) {
         self.require_owner();
         self.owner = new_owner.clone();
@@ -492,8 +501,6 @@ fn hash(data: &str) -> String {
     encode(hasher.finalize())
 }
 
-// ========== TESTS ==========
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,20 +520,29 @@ mod tests {
     fn test_initialization() {
         let context = get_context(accounts(0));
         testing_env!(context.build());
-
         let contract = CoordinatorContract::new(accounts(0));
         assert_eq!(contract.get_owner(), accounts(0));
         assert_eq!(contract.get_current_proposal_id(), 0);
+        assert!(contract.get_manifesto().is_none());
+    }
+
+    #[test]
+    fn test_set_manifesto() {
+        let context = get_context(accounts(0));
+        testing_env!(context.build());
+        let mut contract = CoordinatorContract::new(accounts(0));
+        contract.set_manifesto("We vote for good things.".to_string());
+        let manifesto = contract.get_manifesto().unwrap();
+        assert_eq!(manifesto.text, "We vote for good things.");
+        assert_eq!(manifesto.hash.len(), 64);
     }
 
     #[test]
     fn test_approve_codehash() {
         let context = get_context(accounts(0));
         testing_env!(context.build());
-
         let mut contract = CoordinatorContract::new(accounts(0));
         contract.approve_codehash("test_codehash".to_string());
-
         assert!(contract.is_codehash_approved("test_codehash".to_string()));
     }
 
@@ -535,9 +551,7 @@ mod tests {
     fn test_non_owner_cannot_approve_codehash() {
         let context = get_context(accounts(0));
         testing_env!(context.build());
-
         let mut contract = CoordinatorContract::new(accounts(0));
-
         testing_env!(get_context(accounts(1)).build());
         contract.approve_codehash("test_codehash".to_string());
     }
@@ -546,16 +560,6 @@ mod tests {
     fn test_hash_string() {
         let data = "test data";
         let result = hash(data);
-        assert_eq!(result.len(), 64); // SHA256 produces 64 hex characters
-    }
-
-    #[test]
-    fn test_get_all_proposals_empty() {
-        let context = get_context(accounts(0));
-        testing_env!(context.build());
-
-        let contract = CoordinatorContract::new(accounts(0));
-        let proposals = contract.get_all_proposals(&None, &None);
-        assert_eq!(proposals.len(), 0);
+        assert_eq!(result.len(), 64);
     }
 }

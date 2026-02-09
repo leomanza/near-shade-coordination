@@ -109,6 +109,8 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
 
       const resultKeys = getAllWorkerResultKeys();
       const workerResults = await getEnsueClient().readMultiple(resultKeys);
+      // Only send worker_id + result_hash on-chain (nullifier).
+      // Individual votes stay private in Ensue shared memory.
       const submissions = resultKeys
         .map(key => {
           const resultStr = workerResults[key];
@@ -135,7 +137,7 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
       }
     }
 
-    // Step 6: Aggregate results
+    // Step 6: Aggregate results (vote tally)
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'aggregating');
     const tally = await aggregateResults(proposalId ?? 0);
 
@@ -148,6 +150,9 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
       await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'resuming');
       const onChainResult = JSON.stringify({
         aggregatedValue: tally.aggregatedValue,
+        approved: tally.approved,
+        rejected: tally.rejected,
+        decision: tally.decision,
         workerCount: tally.workerCount,
         timestamp: tally.timestamp,
         proposalId,
@@ -268,6 +273,8 @@ async function processCoordination(
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'recording_submissions');
     console.log('Recording worker submissions on-chain...');
 
+    // Only send worker_id + result_hash on-chain (nullifier).
+    // Individual votes stay private in Ensue shared memory.
     const resultKeys = getAllWorkerResultKeys();
     const workerResults = await getEnsueClient().readMultiple(resultKeys);
     const submissions = resultKeys
@@ -411,7 +418,8 @@ async function waitForWorkers(timeout: number): Promise<boolean> {
 }
 
 /**
- * Aggregate results from all workers
+ * Aggregate results from all workers — vote tally for DAO proposals,
+ * sum for legacy numeric tasks.
  */
 async function aggregateResults(proposalId: number): Promise<TallyResult> {
   console.log('\nAggregating worker results...');
@@ -429,20 +437,41 @@ async function aggregateResults(proposalId: number): Promise<TallyResult> {
       try {
         const result = JSON.parse(resultStr);
         workerResults.push(result);
-        console.log(`Worker ${result.workerId} result:`, result.output.value);
+        if (result.output?.vote) {
+          console.log(`Worker ${result.workerId} vote: ${result.output.vote}`);
+        } else {
+          console.log(`Worker ${result.workerId} result:`, result.output.value);
+        }
       } catch (error) {
         console.error(`Failed to parse result for ${key}:`, error);
       }
     }
   }
 
-  // Perform aggregation (sum all worker values)
-  const aggregatedValue = workerResults.reduce((sum, result) => {
-    return sum + (result.output?.value || 0);
-  }, 0);
+  // Tally votes if any worker voted, otherwise sum values (backward compat)
+  const hasVotes = workerResults.some(r => r.output?.vote);
+  let approved = 0;
+  let rejected = 0;
+
+  if (hasVotes) {
+    for (const r of workerResults) {
+      if (r.output?.vote === 'Approved') approved++;
+      else if (r.output?.vote === 'Rejected') rejected++;
+    }
+    console.log(`\nVote tally: ${approved} Approved, ${rejected} Rejected`);
+  }
+
+  const aggregatedValue = hasVotes
+    ? approved  // For vote tasks, aggregatedValue = number of approvals
+    : workerResults.reduce((sum, r) => sum + (r.output?.value || 0), 0);
+
+  const decision = approved >= rejected ? 'Approved' : 'Rejected';
 
   const tally: TallyResult = {
     aggregatedValue,
+    approved,
+    rejected,
+    decision: hasVotes ? decision : 'Approved',
     workerCount: workerResults.length,
     workers: workerResults,
     timestamp: new Date().toISOString(),
@@ -467,10 +496,13 @@ async function resumeContractWithTally(
   // Update status to resuming
   await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'resuming');
 
-  // Privacy: only send aggregate on-chain, NOT individual worker values
-  // Worker-level results stay private in Ensue shared memory
+  // Privacy: only send aggregate on-chain, NOT individual worker reasoning
+  // Worker-level reasoning stays private in Ensue shared memory
   const onChainResult = JSON.stringify({
     aggregatedValue: tally.aggregatedValue,
+    approved: tally.approved,
+    rejected: tally.rejected,
+    decision: tally.decision,
     workerCount: tally.workerCount,
     timestamp: tally.timestamp,
     proposalId,

@@ -19,11 +19,14 @@ export interface CoordinatorStatus {
   proposalId: number | null;
   tally: {
     aggregatedValue: number;
+    approved: number;
+    rejected: number;
+    decision: string;
     workerCount: number;
     workers: Array<{
       workerId: string;
       taskType: string;
-      output: { value: number; data?: unknown; computedAt: string };
+      output: { value: number; vote?: string; reasoning?: string; data?: unknown; computedAt: string };
       processingTime?: number;
     }>;
     timestamp: string;
@@ -155,6 +158,11 @@ export interface WorkerSubmission {
   timestamp: number;
 }
 
+export interface Manifesto {
+  text: string;
+  hash: string;
+}
+
 export interface OnChainProposal {
   task_config: string;
   config_hash: string;
@@ -169,14 +177,16 @@ export interface OnChainState {
   owner: string;
   currentProposalId: number;
   proposals: Array<{ proposalId: number; proposal: OnChainProposal }>;
+  manifesto: Manifesto | null;
 }
 
 export async function getOnChainState(): Promise<OnChainState | null> {
   try {
-    const [owner, proposalId, allProposals] = await Promise.all([
+    const [owner, proposalId, allProposals, manifesto] = await Promise.all([
       nearViewCall<string>("get_owner"),
       nearViewCall<number>("get_current_proposal_id"),
       nearViewCall<Array<[number, OnChainProposal]>>("get_all_proposals"),
+      nearViewCall<Manifesto>("get_manifesto"),
     ]);
     if (owner === null || proposalId === null) return null;
     return {
@@ -186,8 +196,21 @@ export async function getOnChainState(): Promise<OnChainState | null> {
         proposalId: id,
         proposal,
       })),
+      manifesto: manifesto ?? null,
     };
   } catch {
     return null;
   }
+}
+
+export async function triggerVote(
+  proposal: string
+): Promise<{ message: string } | null> {
+  return safeFetch(`${COORDINATOR_URL}/api/coordinate/trigger`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      taskConfig: { type: "vote", parameters: { proposal }, timeout: 30000 },
+    }),
+  });
 }

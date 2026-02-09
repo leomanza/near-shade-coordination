@@ -4,6 +4,7 @@ import { useCallback, useState } from "react";
 import { usePolling } from "@/lib/use-polling";
 import {
   getOnChainState,
+  triggerVote,
   type OnChainState,
   type ProposalState,
   type OnChainProposal,
@@ -33,6 +34,8 @@ export default function ContractStatePanel() {
   const { data: state, error } = usePolling<OnChainState>(fetcher, 5000);
   const [filter, setFilter] = useState<ProposalState | "All">("All");
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [proposalText, setProposalText] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const proposals = state?.proposals ?? [];
   const filtered =
@@ -43,17 +46,32 @@ export default function ContractStatePanel() {
   const countByState = (s: ProposalState) =>
     proposals.filter((p) => p.proposal.state === s).length;
 
+  const handleSubmitProposal = async () => {
+    if (!proposalText.trim() || submitting) return;
+    setSubmitting(true);
+    try {
+      await triggerVote(proposalText.trim());
+      setProposalText("");
+    } catch (err) {
+      console.error("Failed to submit proposal:", err);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-sm font-semibold text-zinc-100">On-Chain State</h3>
+        <h3 className="text-sm font-semibold text-zinc-100">
+          AI Agent DAO
+        </h3>
         <a
           href={EXPLORER_URL}
           target="_blank"
           rel="noopener noreferrer"
           className="text-[10px] font-mono px-2 py-1 rounded-md bg-zinc-800 text-blue-400 hover:text-blue-300 hover:bg-zinc-700 transition-colors"
         >
-          View on Explorer &rarr;
+          Explorer &rarr;
         </a>
       </div>
 
@@ -61,6 +79,42 @@ export default function ContractStatePanel() {
         <p className="text-xs text-zinc-500">Unable to read contract state</p>
       ) : (
         <div className="space-y-3">
+          {/* Manifesto */}
+          {state.manifesto && (
+            <div className="p-2.5 rounded-lg bg-zinc-800/40 border border-zinc-700/50">
+              <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                Manifesto
+              </p>
+              <p className="text-[10px] text-zinc-400 leading-relaxed line-clamp-3">
+                {state.manifesto.text}
+              </p>
+              <p className="text-[9px] font-mono text-zinc-600 mt-1">
+                hash: {state.manifesto.hash.slice(0, 16)}...
+              </p>
+            </div>
+          )}
+
+          {/* Submit Proposal */}
+          <div className="space-y-1.5">
+            <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider">
+              Submit Proposal for AI Vote
+            </p>
+            <textarea
+              value={proposalText}
+              onChange={(e) => setProposalText(e.target.value)}
+              placeholder="Describe a proposal for the AI agents to vote on..."
+              className="w-full text-xs bg-zinc-800/60 border border-zinc-700/50 rounded-lg p-2 text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-zinc-600 resize-none"
+              rows={2}
+            />
+            <button
+              onClick={handleSubmitProposal}
+              disabled={!proposalText.trim() || submitting}
+              className="text-[10px] px-3 py-1.5 rounded-md bg-blue-600 hover:bg-blue-500 text-white font-semibold disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+            >
+              {submitting ? "Submitting..." : "Submit for Vote"}
+            </button>
+          </div>
+
           {/* Stats bar */}
           <div className="grid grid-cols-4 gap-2">
             <Stat label="Total" value={String(state.currentProposalId)} />
@@ -114,7 +168,7 @@ export default function ContractStatePanel() {
               No proposals {filter !== "All" ? `in ${filter} state` : ""}
             </p>
           ) : (
-            <div className="space-y-1.5 max-h-72 overflow-y-auto">
+            <div className="space-y-1.5 max-h-80 overflow-y-auto">
               {filtered
                 .slice()
                 .reverse()
@@ -160,11 +214,12 @@ function ProposalCard({
       })()
     : null;
 
+  const isVote = parsed && typeof parsed.approved === "number";
   const timeAgo = formatTimeAgo(proposal.timestamp);
 
   return (
     <div className="rounded-lg bg-zinc-800/60 text-xs overflow-hidden">
-      {/* Header row - always visible */}
+      {/* Header row */}
       <button
         onClick={onToggle}
         className="w-full flex items-center justify-between p-2 hover:bg-zinc-800/80 transition-colors text-left"
@@ -178,14 +233,30 @@ function ProposalCard({
           >
             {proposal.state}
           </span>
-          {parsed && (
+          {parsed && isVote && (
+            <span
+              className={`font-semibold ${
+                parsed.decision === "Approved"
+                  ? "text-green-400"
+                  : "text-red-400"
+              }`}
+            >
+              {parsed.decision}
+            </span>
+          )}
+          {parsed && !isVote && (
             <span className="text-green-400 font-mono font-bold">
               {parsed.aggregatedValue}
             </span>
           )}
         </div>
         <div className="flex items-center gap-2">
-          {proposal.worker_submissions.length > 0 && (
+          {isVote && parsed && (
+            <span className="text-zinc-500">
+              {parsed.approved}Y / {parsed.rejected}N
+            </span>
+          )}
+          {proposal.worker_submissions.length > 0 && !isVote && (
             <span className="text-zinc-600">
               {proposal.worker_submissions.length} workers
             </span>
@@ -200,15 +271,22 @@ function ProposalCard({
         <div className="px-3 pb-3 space-y-2 border-t border-zinc-700/50">
           <div className="pt-2 space-y-1">
             <Detail label="Requester" value={truncateAddr(proposal.requester)} mono />
-            <Detail label="Config Hash" value={proposal.config_hash.slice(0, 16) + "..."} mono />
+            <Detail
+              label="Config Hash"
+              value={proposal.config_hash.slice(0, 16) + "..."}
+              mono
+            />
             <Detail label="Task Config" value={proposal.task_config} />
           </div>
 
-          {/* Worker submissions */}
+          {/* Worker submissions with vote badges */}
           {proposal.worker_submissions.length > 0 && (
             <div>
               <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
-                Worker Submissions
+                On-chain Submissions (nullifier)
+              </p>
+              <p className="text-[9px] text-zinc-600 mb-1">
+                Individual votes stay private in Ensue. Only hashes recorded on-chain.
               </p>
               <div className="space-y-1">
                 {proposal.worker_submissions.map((ws) => (
@@ -216,9 +294,11 @@ function ProposalCard({
                     key={ws.worker_id}
                     className="flex items-center justify-between p-1.5 rounded bg-zinc-900/60"
                   >
-                    <span className="font-mono text-zinc-300">{ws.worker_id}</span>
+                    <span className="font-mono text-zinc-400">
+                      {ws.worker_id}
+                    </span>
                     <span className="font-mono text-zinc-600 text-[9px]">
-                      {ws.result_hash.slice(0, 12)}...
+                      {ws.result_hash.slice(0, 16)}...
                     </span>
                   </div>
                 ))}
@@ -226,8 +306,60 @@ function ProposalCard({
             </div>
           )}
 
-          {/* Finalized result */}
-          {parsed && (
+          {/* Vote tally visualization */}
+          {parsed && isVote && (
+            <div>
+              <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
+                Vote Result
+              </p>
+              <div className="p-2 rounded bg-zinc-900/60 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span
+                    className={`font-bold ${
+                      parsed.decision === "Approved"
+                        ? "text-green-400"
+                        : "text-red-400"
+                    }`}
+                  >
+                    {parsed.decision}
+                  </span>
+                  <span className="text-zinc-500 text-[10px]">
+                    {parsed.workerCount} agents voted
+                  </span>
+                </div>
+                {/* Vote bar */}
+                <div className="flex h-2 rounded-full overflow-hidden bg-zinc-700">
+                  {parsed.approved > 0 && (
+                    <div
+                      className="bg-green-500 transition-all"
+                      style={{
+                        width: `${(parsed.approved / parsed.workerCount) * 100}%`,
+                      }}
+                    />
+                  )}
+                  {parsed.rejected > 0 && (
+                    <div
+                      className="bg-red-500 transition-all"
+                      style={{
+                        width: `${(parsed.rejected / parsed.workerCount) * 100}%`,
+                      }}
+                    />
+                  )}
+                </div>
+                <div className="flex justify-between text-[9px]">
+                  <span className="text-green-400">
+                    {parsed.approved} Approved
+                  </span>
+                  <span className="text-red-400">
+                    {parsed.rejected} Rejected
+                  </span>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Legacy numeric result */}
+          {parsed && !isVote && (
             <div>
               <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
                 Finalized Result

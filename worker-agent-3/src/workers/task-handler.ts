@@ -1,6 +1,7 @@
 import { EnsueClient, createEnsueClient } from '../../../shared/src/ensue-client';
 import { MEMORY_KEYS, TaskStatus, getWorkerKeys } from '../../../shared/src/constants';
-import type { TaskConfig, WorkerResult, WorkerStatusInfo } from '../../../shared/src/types';
+import type { TaskConfig, WorkerResult, WorkerStatusInfo, VoteResult } from '../../../shared/src/types';
+import { aiVote } from './ai-voter';
 
 // Lazy-initialize Ensue client (env vars loaded by dotenv before first use)
 let _ensueClient: EnsueClient | null = null;
@@ -46,7 +47,9 @@ export async function executeTask(taskConfig: TaskConfig): Promise<void> {
       workerId: WORKER_ID as any,
       taskType: taskConfig.type,
       output: {
-        value: result,
+        value: result.value,
+        vote: result.vote,
+        reasoning: result.reasoning,
         data: {
           parameters: taskConfig.parameters,
         },
@@ -77,42 +80,93 @@ export async function executeTask(taskConfig: TaskConfig): Promise<void> {
   }
 }
 
+interface WorkResult {
+  value: number;
+  vote?: 'Approved' | 'Rejected';
+  reasoning?: string;
+}
+
+const NEAR_RPC = process.env.NEAR_RPC_JSON || 'https://test.rpc.fastnear.com';
+const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId || 'ac-proxy.agents-coordinator.testnet';
+
 /**
- * Perform the actual work
- * For MVP, this simulates async work with random duration and result
- *
- * In production, this would:
- * - Fetch data from APIs
- * - Run ML inference
- * - Process data
- * - Query databases
- * etc.
+ * Fetch the DAO manifesto from the contract via RPC view call
  */
-async function performWork(config: TaskConfig): Promise<number> {
-  // Extract timeout from config or use default
-  const timeout = config.timeout || 3000;
+async function fetchManifesto(): Promise<{ text: string; hash: string } | null> {
+  try {
+    const res = await fetch(NEAR_RPC, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: '1',
+        method: 'query',
+        params: {
+          request_type: 'call_function',
+          finality: 'final',
+          account_id: CONTRACT_ID,
+          method_name: 'get_manifesto',
+          args_base64: btoa('{}'),
+        },
+      }),
+    });
+    const data = await res.json() as any;
+    if (data.error || !data.result?.result) return null;
+    const bytes = new Uint8Array(data.result.result);
+    const text = new TextDecoder().decode(bytes);
+    return JSON.parse(text);
+  } catch (error) {
+    console.error(`[${WORKER_ID}] Failed to fetch manifesto:`, error);
+    return null;
+  }
+}
 
-  // Simulate async work with variable duration
-  const workDuration = 1000 + Math.random() * timeout;
-
-  await new Promise((resolve) => setTimeout(resolve, workDuration));
-
-  // Generate a result based on task type
+/**
+ * Perform work based on task type.
+ * - 'vote': AI agent votes on a proposal using manifesto alignment
+ * - 'random': random number (legacy/testing)
+ */
+async function performWork(config: TaskConfig): Promise<WorkResult> {
   switch (config.type) {
-    case 'random':
-      return Math.floor(Math.random() * 100);
+    case 'vote': {
+      const proposal = config.parameters?.proposal as string;
+      if (!proposal) throw new Error('Vote task requires parameters.proposal');
+
+      console.log(`[${WORKER_ID}] Fetching manifesto from contract...`);
+      const manifesto = await fetchManifesto();
+      if (!manifesto) throw new Error('Could not fetch manifesto from contract');
+      console.log(`[${WORKER_ID}] Manifesto hash: ${manifesto.hash}`);
+
+      console.log(`[${WORKER_ID}] Calling AI for vote on proposal...`);
+      const voteResult: VoteResult = await aiVote(manifesto.text, proposal);
+      console.log(`[${WORKER_ID}] AI vote: ${voteResult.vote}`);
+      console.log(`[${WORKER_ID}] AI reasoning: ${voteResult.reasoning.substring(0, 200)}...`);
+
+      return {
+        value: voteResult.vote === 'Approved' ? 1 : 0,
+        vote: voteResult.vote,
+        reasoning: voteResult.reasoning,
+      };
+    }
+
+    case 'random': {
+      const timeout = config.timeout || 3000;
+      const workDuration = 1000 + Math.random() * timeout;
+      await new Promise((resolve) => setTimeout(resolve, workDuration));
+      return { value: Math.floor(Math.random() * 100) };
+    }
 
     case 'count':
-      return config.parameters?.count || 42;
+      return { value: config.parameters?.count || 42 };
 
-    case 'multiply':
+    case 'multiply': {
       const a = config.parameters?.a || 1;
       const b = config.parameters?.b || 1;
-      return a * b;
+      return { value: a * b };
+    }
 
     default:
-      // Default: generate random value
-      return Math.floor(Math.random() * 100);
+      return { value: Math.floor(Math.random() * 100) };
   }
 }
 

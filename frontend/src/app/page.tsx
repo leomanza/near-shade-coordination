@@ -11,23 +11,19 @@ import {
   getCoordinatorStatus,
   getWorkerStatuses,
   getCoordinatorHealth,
-  triggerWorkerTask,
   resetMemory,
-  triggerCoordination,
   type CoordinatorStatus,
   type WorkerStatuses,
 } from "@/lib/api";
 
-const WORKERS = [
-  { id: "worker1", label: "Worker Agent 1", port: 3001 },
-  { id: "worker2", label: "Worker Agent 2", port: 3002 },
-  { id: "worker3", label: "Worker Agent 3", port: 3003 },
+const AGENTS = [
+  { id: "worker1", label: "Voter Agent 1", port: 3001 },
+  { id: "worker2", label: "Voter Agent 2", port: 3002 },
+  { id: "worker3", label: "Voter Agent 3", port: 3003 },
 ];
 
 export default function Dashboard() {
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [triggeringAll, setTriggeringAll] = useState(false);
-  const [coordinating, setCoordinating] = useState(false);
   const [resetting, setResetting] = useState(false);
   const prevStatusRef = useRef<Record<string, string>>({});
 
@@ -80,29 +76,6 @@ export default function Dashboard() {
     };
   }, [workerStatuses, coordStatus, addLog]);
 
-  async function handleTriggerAll() {
-    setTriggeringAll(true);
-    addLog("Triggering all workers with random tasks...", "info");
-    const results = await Promise.all(
-      WORKERS.map((w) => triggerWorkerTask(w.id, "random"))
-    );
-    const succeeded = results.filter(Boolean).length;
-    addLog(`Triggered ${succeeded}/${WORKERS.length} workers`, succeeded === WORKERS.length ? "success" : "warning");
-    setTriggeringAll(false);
-  }
-
-  async function handleCoordination() {
-    setCoordinating(true);
-    addLog("Starting full coordination flow...", "info");
-    const result = await triggerCoordination("random");
-    if (result) {
-      addLog("Coordination triggered - monitoring workers", "success");
-    } else {
-      addLog("Failed to trigger coordination", "error");
-    }
-    setCoordinating(false);
-  }
-
   async function handleReset() {
     setResetting(true);
     addLog("Resetting all memory...", "info");
@@ -121,14 +94,14 @@ export default function Dashboard() {
       <header className="mb-8">
         <div className="flex items-center gap-3 mb-2">
           <div className="h-8 w-8 rounded-lg bg-gradient-to-br from-green-500 to-blue-600 flex items-center justify-center text-xs font-bold">
-            S
+            D
           </div>
           <h1 className="text-xl font-bold text-zinc-100">
-            Shade Agent Coordination
+            AI Agent DAO
           </h1>
         </div>
         <p className="text-sm text-zinc-500">
-          Multi-agent coordination with Ensue shared memory on NEAR
+          Multi-agent deliberation &amp; voting with privacy-preserving coordination on NEAR
         </p>
       </header>
 
@@ -138,31 +111,17 @@ export default function Dashboard() {
           <StatusDot status={coordinatorOnline ? "completed" : "offline"} />
           <span>Coordinator</span>
         </div>
-        {WORKERS.map((w) => {
+        {AGENTS.map((a) => {
           const status =
-            workerStatuses?.workers[w.id as keyof typeof workerStatuses.workers] || "unknown";
+            workerStatuses?.workers[a.id as keyof typeof workerStatuses.workers] || "unknown";
           return (
-            <div key={w.id} className="flex items-center gap-2 text-xs text-zinc-400">
+            <div key={a.id} className="flex items-center gap-2 text-xs text-zinc-400">
               <StatusDot status={workerError ? "offline" : status} />
-              <span>{w.label.replace("Worker Agent ", "W")}</span>
+              <span>{a.label.replace("Voter Agent ", "V")}</span>
             </div>
           );
         })}
-        <div className="ml-auto flex gap-2">
-          <button
-            onClick={handleCoordination}
-            disabled={coordinating || !coordinatorOnline}
-            className="text-xs px-4 py-1.5 rounded-lg bg-green-600 text-white hover:bg-green-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {coordinating ? "Running..." : "Run Coordination"}
-          </button>
-          <button
-            onClick={handleTriggerAll}
-            disabled={triggeringAll || !coordinatorOnline}
-            className="text-xs px-4 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {triggeringAll ? "Triggering..." : "Trigger All Workers"}
-          </button>
+        <div className="ml-auto">
           <button
             onClick={handleReset}
             disabled={resetting || !coordinatorOnline}
@@ -178,15 +137,15 @@ export default function Dashboard() {
         {/* Coordinator */}
         <CoordinatorPanel status={coordStatus} online={coordinatorOnline} />
 
-        {/* Workers */}
-        {WORKERS.map((w) => (
+        {/* Voter Agents */}
+        {AGENTS.map((a) => (
           <WorkerCard
-            key={w.id}
-            workerId={w.id}
-            label={w.label}
-            port={w.port}
+            key={a.id}
+            workerId={a.id}
+            label={a.label}
+            port={a.port}
             status={
-              workerStatuses?.workers[w.id as keyof typeof workerStatuses.workers] || "unknown"
+              workerStatuses?.workers[a.id as keyof typeof workerStatuses.workers] || "unknown"
             }
           />
         ))}
@@ -197,25 +156,25 @@ export default function Dashboard() {
         <ContractStatePanel />
       </div>
 
-      {/* Architecture Diagram + Event Log */}
+      {/* Voting Flow + Event Log */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Flow Diagram */}
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
-          <h3 className="text-sm font-semibold text-zinc-100 mb-4">Coordination Flow</h3>
+          <h3 className="text-sm font-semibold text-zinc-100 mb-4">Voting Flow</h3>
           <div className="font-mono text-xs space-y-2 text-zinc-500">
             <FlowStep
               n={1}
-              label="Contract yields coordination"
+              label="Proposal submitted to contract"
               active={coordStatus?.status === "idle"}
             />
             <FlowStep
               n={2}
-              label="Coordinator detects pending task"
+              label="Coordinator dispatches to voters"
               active={coordStatus?.status === "monitoring"}
             />
             <FlowStep
               n={3}
-              label="Workers execute via Ensue"
+              label="AI agents deliberate & vote"
               active={
                 workerStatuses?.workers.worker1 === "processing" ||
                 workerStatuses?.workers.worker2 === "processing" ||
@@ -224,18 +183,18 @@ export default function Dashboard() {
             />
             <FlowStep
               n={4}
-              label="Coordinator aggregates results"
-              active={coordStatus?.status === "aggregating"}
+              label="Record votes on-chain (nullifier)"
+              active={coordStatus?.status === "recording_submissions"}
             />
             <FlowStep
               n={5}
-              label="Resume contract with tally"
-              active={coordStatus?.status === "resuming"}
+              label="Coordinator tallies votes"
+              active={coordStatus?.status === "aggregating"}
             />
             <FlowStep
               n={6}
               label="Result finalized on-chain"
-              active={coordStatus?.status === "completed"}
+              active={coordStatus?.status === "completed" || coordStatus?.status === "resuming"}
             />
           </div>
         </div>
@@ -246,7 +205,7 @@ export default function Dashboard() {
 
       {/* Footer */}
       <footer className="mt-8 text-center text-xs text-zinc-600">
-        NEAR Shade Agent Coordination MVP &middot; Ensue Shared Memory &middot; Phala TEE
+        AI Agent DAO &middot; NEAR Shade Agents &middot; Ensue Shared Memory &middot; Phala TEE
       </footer>
     </div>
   );

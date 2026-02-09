@@ -1,6 +1,16 @@
 import { TaskStatus, CoordinatorStatus, WorkerId } from './constants';
 
 /**
+ * AI vote result from a worker agent
+ */
+export type VoteDecision = 'Approved' | 'Rejected';
+
+export interface VoteResult {
+  vote: VoteDecision;
+  reasoning: string;
+}
+
+/**
  * Worker task result structure
  */
 export interface WorkerResult {
@@ -8,6 +18,8 @@ export interface WorkerResult {
   taskType: string;
   output: {
     value: number;
+    vote?: VoteDecision;
+    reasoning?: string;
     data?: any;
     computedAt: string;
   };
@@ -15,10 +27,13 @@ export interface WorkerResult {
 }
 
 /**
- * Aggregated tally result from coordinator (full detail, stored in Ensue only)
+ * Vote tally from coordinator (full detail, stored in Ensue only)
  */
 export interface TallyResult {
   aggregatedValue: number;
+  approved: number;
+  rejected: number;
+  decision: VoteDecision;
   workerCount: number;
   workers: WorkerResult[];
   timestamp: string;
@@ -26,11 +41,14 @@ export interface TallyResult {
 }
 
 /**
- * On-chain result: only the aggregate, NO individual worker values
- * Worker-level data stays private in Ensue shared memory
+ * On-chain result: only the tally, NO individual worker reasoning
+ * Worker-level reasoning stays private in Ensue shared memory
  */
 export interface OnChainResult {
   aggregatedValue: number;
+  approved: number;
+  rejected: number;
+  decision: VoteDecision;
   workerCount: number;
   timestamp: string;
   proposalId: number;
@@ -51,7 +69,8 @@ export interface TaskConfig {
 export type ProposalState = 'Created' | 'WorkersCompleted' | 'Finalized' | 'TimedOut';
 
 /**
- * Worker submission recorded on-chain (nullifier)
+ * Worker submission recorded on-chain (nullifier only — no vote data).
+ * Individual votes stay private in Ensue shared memory.
  */
 export interface WorkerSubmission {
   worker_id: string;
@@ -60,7 +79,7 @@ export interface WorkerSubmission {
 }
 
 /**
- * Input for recording worker submissions
+ * Input for recording worker submissions (nullifier)
  */
 export interface WorkerSubmissionInput {
   worker_id: string;

@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback } from "react";
 import StatusDot from "./StatusDot";
-import { triggerWorkerTask, getWorkerHealth, type WorkerHealth } from "@/lib/api";
+import { getWorkerHealth, type WorkerHealth } from "@/lib/api";
 import { usePolling } from "@/lib/use-polling";
 
 interface WorkerCardProps {
@@ -13,29 +13,14 @@ interface WorkerCardProps {
 }
 
 export default function WorkerCard({ workerId, label, port, status }: WorkerCardProps) {
-  const [triggering, setTriggering] = useState(false);
-  const [lastAction, setLastAction] = useState<string | null>(null);
-
   const healthFetcher = useCallback(() => getWorkerHealth(workerId), [workerId]);
   const { data: health, error: healthError } = usePolling<WorkerHealth>(healthFetcher, 5000);
 
   const online = !healthError && health?.healthy;
 
-  async function handleTrigger(taskType: string) {
-    setTriggering(true);
-    setLastAction(null);
-    const result = await triggerWorkerTask(workerId, taskType);
-    setTriggering(false);
-    if (result) {
-      setLastAction(`Started: ${result.taskType}`);
-    } else {
-      setLastAction("Failed to trigger");
-    }
-  }
-
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-3">
         <div className="flex items-center gap-3">
           <StatusDot status={online ? status : "offline"} />
           <div>
@@ -48,22 +33,13 @@ export default function WorkerCard({ workerId, label, port, status }: WorkerCard
         </span>
       </div>
 
-      <div className="flex gap-2 mb-3">
-        {["random", "count", "multiply"].map((type) => (
-          <button
-            key={type}
-            onClick={() => handleTrigger(type)}
-            disabled={triggering || !online}
-            className="text-xs px-3 py-1.5 rounded-lg bg-zinc-800 text-zinc-300 hover:bg-zinc-700 hover:text-zinc-100 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-          >
-            {type}
-          </button>
-        ))}
-      </div>
-
-      {lastAction && (
-        <p className="text-xs text-zinc-500 mt-1">{lastAction}</p>
-      )}
+      <p className="text-[10px] text-zinc-600">
+        {status === "processing"
+          ? "Deliberating on proposal..."
+          : status === "completed"
+            ? "Vote submitted"
+            : "Waiting for proposal"}
+      </p>
     </div>
   );
 }
