@@ -1,152 +1,167 @@
 # Coordinator Contract
 
-NEAR smart contract implementing the yield/resume pattern for multi-agent coordination.
+NEAR smart contract for privacy-preserving multi-agent DAO voting using the yield/resume pattern.
 
 ## Overview
 
-This contract coordinates multiple worker agents by:
-1. Accepting coordination requests from users (`start_coordination`)
-2. Creating a yielded promise that pauses execution
-3. Waiting for coordinator agent to aggregate worker results
-4. Resuming execution when coordinator calls `coordinator_resume`
-5. Storing final results on-chain
+AI agents independently deliberate on DAO proposals and vote. This contract manages the proposal lifecycle:
 
-## Architecture Pattern
+1. Owner sets a **manifesto** (DAO guidelines the AI agents reference)
+2. Anyone calls `start_coordination` with a proposal — contract creates a yielded promise
+3. Coordinator agent dispatches the proposal to voter agents off-chain
+4. Voters deliberate via AI and submit votes to Ensue (private, off-chain)
+5. Coordinator records worker submission hashes on-chain (**nullifier** — prevents double-voting)
+6. Coordinator calls `coordinator_resume` with the **aggregate tally only** (no individual votes)
+7. Contract validates hashes and finalizes the result on-chain
 
-Based on [verifiable-ai-dao](file:///Users/manza/Code/AGENTS/verifiable-ai-dao/contract/src/dao.rs) yield/resume implementation:
+Individual AI votes and reasoning never touch the blockchain.
+
+## Proposal Lifecycle
 
 ```
-User calls start_coordination(task_config)
-  ↓
-Contract creates yield (promise pauses)
-  ↓
-Coordinator agent polls get_pending_coordinations()
-  ↓
-Coordinator monitors workers via Ensue
-  ↓
-Coordinator aggregates results
-  ↓
-Coordinator calls coordinator_resume(proposal_id, result, hashes)
-  ↓
-Contract resumes promise with result
-  ↓
-return_coordination_result callback finalizes
+Created ──────────────> WorkersCompleted ──────────────> Finalized
+(yield created,         (worker hashes              (aggregate result
+ waiting for agents)     recorded on-chain)           stored on-chain)
+       │
+       └──────────────────────────────────────────> TimedOut
+                    (yield expired, ~200 blocks)
 ```
 
-## Key Functions
+## Contract Functions
 
-### User Functions
+### Manifesto
 
-- `start_coordination(task_config: String) -> Promise`
-  - Initiates a coordination task
-  - Creates yielded promise
-  - Returns proposal ID
+| Function | Caller | Description |
+|----------|--------|-------------|
+| `set_manifesto(manifesto_text)` | Owner | Set DAO guidelines (max 10,000 chars) |
+| `get_manifesto()` | Anyone | View current manifesto with hash |
 
-### Coordinator Functions
+### Coordination
 
-- `coordinator_resume(proposal_id, result, config_hash, result_hash)`
-  - Resumes yielded promise with aggregated results
-  - Validates hashes for security
-  - Must be called by registered coordinator
+| Function | Caller | Description |
+|----------|--------|-------------|
+| `start_coordination(task_config)` | Anyone | Submit proposal, creates yield, returns proposal_id |
+| `record_worker_submissions(proposal_id, submissions)` | Coordinator (TEE) | Record worker hashes (nullifier) |
+| `coordinator_resume(proposal_id, aggregated_result, config_hash, result_hash)` | Coordinator (TEE) | Settle aggregate result on-chain |
 
 ### View Functions
 
-- `get_pending_coordinations() -> Vec<(u64, CoordinationRequest)>`
-  - Returns all pending coordinations (for agent polling)
-- `get_finalized_coordination(proposal_id) -> Option<String>`
-  - Returns result for completed coordination
-- `get_current_proposal_id() -> u64`
-  - Returns next proposal ID
+| Function | Returns |
+|----------|---------|
+| `get_proposal(proposal_id)` | Full proposal details |
+| `get_all_proposals(from_index, limit)` | Paginated proposals |
+| `get_proposals_by_state(state, from_index, limit)` | Filtered by state |
+| `get_pending_coordinations(from_index, limit)` | Proposals in `Created` state |
+| `get_finalized_coordination(proposal_id)` | Finalized result string |
+| `get_all_finalized_coordinations(from_index, limit)` | All finalized results |
+| `get_worker_submissions(proposal_id)` | Worker submission hashes |
+| `get_current_proposal_id()` | Next proposal ID |
+| `get_owner()` | Contract owner |
 
 ### Owner Functions
 
-- `register_coordinator(quote_hex, collateral, checksum, tcb_info)`
-  - Registers coordinator agent with TEE verification
-- `approve_codehash(codehash: String)`
-  - Approves Docker image hash for agent
-- `remove_codehash(codehash: String)`
-  - Revokes codehash approval
+| Function | Description |
+|----------|-------------|
+| `approve_codehash(codehash)` | Approve a Docker image hash |
+| `register_coordinator(checksum, codehash)` | Register coordinator agent |
+| `remove_codehash(codehash)` | Revoke codehash approval |
+| `clear_proposal(proposal_id)` | Remove a proposal |
+| `transfer_ownership(new_owner)` | Transfer contract ownership |
 
-## Security Features
+## Security
 
-### Hash Validation
+### Hash Verification
 
-Following [verifiable-ai-dao security pattern](file:///Users/manza/Code/AGENTS/verifiable-ai-dao/contract/src/dao.rs#L133-L142):
+- **config_hash** — SHA256 of `task_config`, computed at submission. Coordinator must provide matching hash when resuming, proving the task wasn't tampered with.
+- **result_hash** — SHA256 of `aggregated_result`, computed by coordinator. Contract re-hashes the result and verifies it matches, ensuring data integrity.
 
-- `config_hash`: SHA256 of task_config, prevents tampering during execution
-- `result_hash`: SHA256 of aggregated_result, ensures result integrity
+### Nullifier Pattern
 
-### TEE Verification
+`record_worker_submissions` records `{worker_id, result_hash}` pairs on-chain. Each worker can submit only once per proposal (checked by worker_id). The result_hash commits the worker to their vote without revealing it.
 
-- Coordinator must be registered with valid TEE attestation
-- Docker image codehash must be pre-approved by owner
-- Uses dcap-qvl for Intel TDX attestation verification (testnet: placeholder)
+### TEE Gating
+
+Only coordinators registered via `register_coordinator` with an `approved_codehash` can call `record_worker_submissions` and `coordinator_resume`. In production, registration requires DCAP attestation verification.
+
+## What's On-Chain vs Off-Chain
+
+**On-chain (public):**
+```json
+{
+  "task_config": "{\"type\":\"vote\",\"parameters\":{\"proposal\":\"Fund grants\"}}",
+  "config_hash": "a3f2...",
+  "state": "Finalized",
+  "worker_submissions": [
+    {"worker_id": "worker1", "result_hash": "b4c5...", "timestamp": 1770497735},
+    {"worker_id": "worker2", "result_hash": "d6e7...", "timestamp": 1770497736}
+  ],
+  "finalized_result": "{\"approved\":2,\"rejected\":1,\"decision\":\"Approved\",\"workerCount\":3}"
+}
+```
+
+**Off-chain (Ensue, private):**
+- Individual votes (Approved/Rejected per worker)
+- AI reasoning for each vote
+- Processing times, error details, intermediate states
 
 ## Building
 
 ```bash
-# Build contract
+# Build contract (requires nightly Rust for NEAR WASM target)
 cargo near build
+
+# Or manual build with NEAR-compatible flags:
+RUSTFLAGS='-C link-arg=-s -C target-cpu=mvp -C target-feature=-bulk-memory,-sign-ext' \
+  cargo build --target wasm32-unknown-unknown --release
+
+# Optimize
+wasm-opt -Oz target/wasm32-unknown-unknown/release/*.wasm -o coordinator_contract.wasm
 
 # Run tests
 cargo test
+```
 
-# Deploy to testnet (ac-proxy prefix)
+## Deployment
+
+```bash
+# Deploy to testnet
 shade-agent-cli --wasm target/near/coordinator_contract.wasm --funding 7
 
-# For Phala production (ac-sandbox prefix)
-cargo near build --reproducible
-shade-agent-cli --wasm target/near/coordinator_contract.wasm --funding 10
+# Initialize
+near call $CONTRACT new '{"owner":"agents-coordinator.testnet"}' --accountId $CONTRACT
+
+# Set manifesto
+near call $CONTRACT set_manifesto '{"manifesto_text":"We support proposals that..."}' --accountId $OWNER
+
+# Approve coordinator codehash
+near call $CONTRACT approve_codehash '{"codehash":"7173eea7b2fb1c7f76ad3b88d65fb23f50cbb465d42eeacd726623da643d666c"}' --accountId $OWNER
+
+# Register coordinator
+near call $CONTRACT register_coordinator '{"checksum":"...","codehash":"7173eea7..."}' --accountId $OWNER
 ```
+
+**Contract address:** `ac-proxy.agents-coordinator.testnet`
+**Owner:** `agents-coordinator.testnet`
+**NEAR RPC:** `https://test.rpc.fastnear.com`
 
 ## Gas Costs
 
-- `start_coordination`: ~10-20 Tgas
-- `coordinator_resume`: ~50-60 Tgas (includes callback)
-- `return_coordination_result`: 50 Tgas (callback gas)
-
-## Storage
-
-- Pending coordinations: ~500 bytes per coordination
-- Finalized results: Variable (depends on result size)
-- Recommend attaching 0.1 NEAR per coordination for storage
-
-## Testing
-
-```bash
-# Unit tests
-cargo test
-
-# Integration test locally
-near call $CONTRACT start_coordination '{"task_config":"{\"type\":\"test\"}"}' --accountId test.testnet
-```
-
-## Production Notes
-
-### For Mainnet Deployment
-
-1. **Enable TEE Verification**: Uncomment DCAP verification in `register_coordinator()`
-2. **Reproducible Build**: Use `cargo near build --reproducible`
-3. **Set Limits**: Add max result size limits
-4. **Timeout Handling**: Implement timeout for stuck coordinations
-5. **Gas Optimization**: Profile and optimize gas usage
-
-### Known Limitations (Testnet MVP)
-
-- TEE verification uses placeholder codehash (not actual DCAP verification)
-- No timeout mechanism for stuck coordinations
-- No result size limits
-- No pagination for view functions
+| Function | Gas |
+|----------|-----|
+| `start_coordination` | ~10-20 Tgas |
+| `record_worker_submissions` | ~15-25 Tgas |
+| `coordinator_resume` | ~50-60 Tgas (includes callback) |
+| `return_coordination_result` | 50 Tgas (callback) |
 
 ## Dependencies
 
-- `near-sdk`: 5.7.0 (yield/resume support)
-- `dcap-qvl`: TEE attestation verification
-- `sha2`: Hash validation
-- `serde_json`: JSON serialization
+- `near-sdk` 5.7.0 — NEAR smart contract SDK (yield/resume support)
+- `sha2` — SHA256 hash computation
+- `hex` — Hash hex encoding
+- `serde_json` — JSON serialization
 
 ## References
 
-- [NEAR Yield/Resume Documentation](https://docs.near.org/ai/shade-agents/tutorials/ai-dao/overview)
-- [Verifiable AI DAO Contract](file:///Users/manza/Code/AGENTS/verifiable-ai-dao/contract/src/dao.rs)
+- [NEAR Yield/Resume](https://docs.near.org/ai/shade-agents/tutorials/ai-dao/overview)
 - [NEAR SDK Documentation](https://docs.near.org/sdk/rust/introduction)
+- [Verifiable AI DAO (reference implementation)](https://github.com/NearDeFi/verifiable-ai-dao)
