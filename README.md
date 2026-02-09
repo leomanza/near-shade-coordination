@@ -145,7 +145,7 @@ cp .env.development.local.example .env.development.local
 # Edit with your values
 WORKER_ID=worker1
 PORT=3001
-ENSUE_API_KEY=lmn_7516bb04583b402f9b95bbafaa9c2c5b
+ENSUE_API_KEY=
 
 # Start in development mode
 npm run dev
@@ -215,7 +215,7 @@ NEAR_ACCOUNT_ID=agents-coordinator.testnet
 NEXT_PUBLIC_contractId=ac-proxy.agents-coordinator.testnet
 
 # Ensue
-ENSUE_API_KEY=lmn_7516bb04583b402f9b95bbafaa9c2c5b
+ENSUE_API_KEY=
 
 # Workers
 WORKER_ID=worker1  # worker2, worker3
