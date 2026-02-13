@@ -4,6 +4,7 @@ node_modules/
 # Build outputs
 frontend/.next/
 coordinator-contract/target/
+shared/dist/
 
 # Environment files with secrets
 .env

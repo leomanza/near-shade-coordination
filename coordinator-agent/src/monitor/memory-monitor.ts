@@ -28,8 +28,8 @@ function getEnsueClient(): EnsueClient {
 // Polling interval (5 seconds like verifiable-ai-dao/src/responder.ts:13)
 const POLL_INTERVAL = Number(process.env.POLL_INTERVAL) || 5000;
 
-// Worker completion timeout (30 seconds)
-const WORKER_TIMEOUT = 30000;
+// Worker completion timeout (120 seconds - needs room for Nova load + AI inference + Nova record)
+const WORKER_TIMEOUT = 120000;
 
 /**
  * Start the coordination monitoring loop (production - polls contract)

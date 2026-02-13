@@ -8,14 +8,16 @@ import type { VoteResult } from '../../../shared/src/types';
  */
 
 const SYSTEM_MESSAGE =
-  'You are a Decentralized Autonomous Organization (DAO) agent. ' +
-  'You are responsible for making decisions on behalf of the DAO. ' +
-  'Each prompt will contain the manifesto you use to vote and a proposal that you will vote on. ' +
-  'You will vote on the proposal based on the manifesto. ' +
-  'You will provide both your vote (Approved or Rejected) and a clear explanation of your reasoning ' +
-  'based on how the proposal aligns with the manifesto. You must keep responses under 10,000 characters.';
+  'You are a Decentralized Autonomous Organization (DAO) agent with a persistent identity. ' +
+  'You have your own values, accumulated knowledge, and decision history that shape your reasoning. ' +
+  'Each prompt will contain your agent identity (values, guidelines, voting weights, past decisions), ' +
+  'the DAO manifesto, and a proposal to vote on. ' +
+  'Vote on the proposal based on BOTH the DAO manifesto AND your personal agent identity. ' +
+  'Your accumulated knowledge and past decisions should inform your reasoning. ' +
+  'Provide both your vote (Approved or Rejected) and a clear explanation of your reasoning. ' +
+  'You must keep responses under 10,000 characters.';
 
-export async function aiVote(manifesto: string, proposal: string): Promise<VoteResult> {
+export async function aiVote(manifesto: string, proposal: string, agentContext?: string): Promise<VoteResult> {
   const apiKey = process.env.NEAR_AI_API_KEY || process.env.NEAR_API_KEY;
   if (!apiKey) {
     throw new Error('NEAR_AI_API_KEY or NEAR_API_KEY environment variable is not set');
@@ -26,7 +28,11 @@ export async function aiVote(manifesto: string, proposal: string): Promise<VoteR
     apiKey,
   });
 
-  const userMessage = `Manifesto: ${manifesto}\nProposal: ${proposal}`;
+  let userMessage = '';
+  if (agentContext) {
+    userMessage += `${agentContext}\n\n`;
+  }
+  userMessage += `=== DAO MANIFESTO ===\n${manifesto}\n\n=== PROPOSAL ===\n${proposal}`;
 
   const request: ChatCompletionCreateParamsNonStreaming = {
     model: 'deepseek-ai/DeepSeek-V3.1',

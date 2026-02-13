@@ -2,6 +2,12 @@ import { EnsueClient, createEnsueClient } from '../../../shared/src/ensue-client
 import { MEMORY_KEYS, TaskStatus, getWorkerKeys } from '../../../shared/src/constants';
 import type { TaskConfig, WorkerResult, WorkerStatusInfo, VoteResult } from '../../../shared/src/types';
 import { aiVote } from './ai-voter';
+import {
+  initializeIdentity,
+  loadIdentity,
+  formatIdentityContext,
+  recordDecision,
+} from '../nova/agent-identity';
 
 // Lazy-initialize Ensue client (env vars loaded by dotenv before first use)
 let _ensueClient: EnsueClient | null = null;
@@ -86,8 +92,11 @@ interface WorkResult {
   reasoning?: string;
 }
 
-const NEAR_RPC = process.env.NEAR_RPC_JSON || 'https://test.rpc.fastnear.com';
-const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId || 'ac-proxy.agents-coordinator.testnet';
+const NEAR_NETWORK = process.env.NEAR_NETWORK || 'testnet';
+const NEAR_RPC = process.env.NEAR_RPC_JSON
+  || (NEAR_NETWORK === 'mainnet' ? 'https://rpc.fastnear.com' : 'https://test.rpc.fastnear.com');
+const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
+  || (NEAR_NETWORK === 'mainnet' ? 'coordinator.delibera.near' : 'ac-proxy.agents-coordinator.testnet');
 
 /**
  * Fetch the DAO manifesto from the contract via RPC view call
@@ -137,10 +146,31 @@ async function performWork(config: TaskConfig): Promise<WorkResult> {
       if (!manifesto) throw new Error('Could not fetch manifesto from contract');
       console.log(`[${WORKER_ID}] Manifesto hash: ${manifesto.hash}`);
 
+      // Load persistent agent identity from Nova
+      let agentContext: string | undefined;
+      try {
+        console.log(`[${WORKER_ID}] Loading agent identity from Nova...`);
+        const identity = await loadIdentity();
+        agentContext = formatIdentityContext(identity);
+        console.log(`[${WORKER_ID}] Agent identity loaded (${identity.recentDecisions.length} past decisions)`);
+      } catch (e) {
+        console.warn(`[${WORKER_ID}] Nova identity unavailable, proceeding without:`, e);
+      }
+
       console.log(`[${WORKER_ID}] Calling AI for vote on proposal...`);
-      const voteResult: VoteResult = await aiVote(manifesto.text, proposal);
+      const voteResult: VoteResult = await aiVote(manifesto.text, proposal, agentContext);
       console.log(`[${WORKER_ID}] AI vote: ${voteResult.vote}`);
       console.log(`[${WORKER_ID}] AI reasoning: ${voteResult.reasoning.substring(0, 200)}...`);
+
+      // Record decision to Nova for persistent history
+      try {
+        const proposalId = config.parameters?.proposalId as string
+          || `proposal-${Date.now()}`;
+        await recordDecision(proposalId, proposal, voteResult.vote, voteResult.reasoning);
+        console.log(`[${WORKER_ID}] Decision recorded to Nova`);
+      } catch (e) {
+        console.warn(`[${WORKER_ID}] Failed to record decision to Nova:`, e);
+      }
 
       return {
         value: voteResult.vote === 'Approved' ? 1 : 0,
@@ -205,6 +235,15 @@ export async function initializeWorker(): Promise<void> {
 
     // Clear any previous error
     await getEnsueClient().deleteMemory(workerKeys.ERROR);
+
+    // Initialize Nova persistent identity (non-blocking)
+    if (process.env.NOVA_API_KEY) {
+      initializeIdentity()
+        .then(() => console.log(`[${WORKER_ID}] Nova identity initialized`))
+        .catch(e => console.warn(`[${WORKER_ID}] Nova identity init failed (non-critical):`, e));
+    } else {
+      console.log(`[${WORKER_ID}] NOVA_API_KEY not set, skipping Nova identity`);
+    }
 
     console.log(`[${WORKER_ID}] Worker initialized successfully`);
   } catch (error) {

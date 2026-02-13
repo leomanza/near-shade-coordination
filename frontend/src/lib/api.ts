@@ -119,8 +119,12 @@ export async function triggerCoordination(
 
 // ── On-chain reads (directly from NEAR RPC) ──
 
-const NEAR_RPC = "https://test.rpc.fastnear.com";
-const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId || "ac-proxy.agents-coordinator.testnet";
+const NEAR_NETWORK = process.env.NEXT_PUBLIC_NEAR_NETWORK || "testnet";
+const NEAR_RPC = NEAR_NETWORK === "mainnet"
+  ? "https://rpc.fastnear.com"
+  : "https://test.rpc.fastnear.com";
+const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
+  || (NEAR_NETWORK === "mainnet" ? "coordinator.delibera.near" : "ac-proxy.agents-coordinator.testnet");
 
 async function nearViewCall<T>(method: string, args: Record<string, unknown> = {}): Promise<T | null> {
   try {
@@ -201,6 +205,71 @@ export async function getOnChainState(): Promise<OnChainState | null> {
   } catch {
     return null;
   }
+}
+
+// ── Nova / Agent Identity API ──
+
+export interface AgentManifesto {
+  agentId: string;
+  name: string;
+  role: string;
+  values: string[];
+  guidelines: string;
+}
+
+export interface AgentPreferences {
+  agentId: string;
+  votingWeights: Record<string, number>;
+  knowledgeNotes: string[];
+  updatedAt: string;
+}
+
+export interface DecisionRecord {
+  proposalId: string;
+  proposal: string;
+  vote: "Approved" | "Rejected";
+  reasoning: string;
+  timestamp: string;
+}
+
+export interface AgentIdentity {
+  manifesto: AgentManifesto;
+  preferences: AgentPreferences;
+  recentDecisions: DecisionRecord[];
+  formatted: string;
+}
+
+export async function getAgentIdentity(workerId: string): Promise<AgentIdentity | null> {
+  const url = WORKER_URLS[workerId];
+  if (!url) return null;
+  return safeFetch<AgentIdentity>(`${url}/api/knowledge/identity`);
+}
+
+export async function feedKnowledge(
+  workerId: string,
+  notes?: string[],
+  votingWeights?: Record<string, number>,
+): Promise<{ message: string; preferences: AgentPreferences } | null> {
+  const url = WORKER_URLS[workerId];
+  if (!url) return null;
+  return safeFetch(`${url}/api/knowledge/feed`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ notes, votingWeights }),
+  });
+}
+
+export async function updateAgentManifesto(
+  workerId: string,
+  updates: Partial<Omit<AgentManifesto, "agentId">>,
+): Promise<{ message: string; manifesto: AgentManifesto } | null> {
+  const url = WORKER_URLS[workerId];
+  if (!url) return null;
+  return safeFetch(`${url}/api/knowledge/manifesto`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
 }
 
 export async function triggerVote(

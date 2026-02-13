@@ -5,9 +5,13 @@
 import crypto from 'crypto';
 import { Buffer } from 'buffer';
 
-const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId || 'ac-proxy.agents-coordinator.testnet';
-const SIGNER_ID = process.env.NEAR_ACCOUNT_ID || 'agents-coordinator.testnet';
-const NEAR_RPC = process.env.NEAR_RPC_JSON || 'https://test.rpc.fastnear.com';
+const NEAR_NETWORK = process.env.NEAR_NETWORK || 'testnet';
+const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
+  || (NEAR_NETWORK === 'mainnet' ? 'coordinator.delibera.near' : 'ac-proxy.agents-coordinator.testnet');
+const SIGNER_ID = process.env.NEAR_ACCOUNT_ID
+  || (NEAR_NETWORK === 'mainnet' ? 'delibera.near' : 'agents-coordinator.testnet');
+const NEAR_RPC = process.env.NEAR_RPC_JSON
+  || (NEAR_NETWORK === 'mainnet' ? 'https://rpc.fastnear.com' : 'https://test.rpc.fastnear.com');
 
 // We use near CLI for transaction signing (sign-with-keychain)
 import { execSync } from 'child_process';
@@ -17,7 +21,7 @@ const NEAR_CLI = process.env.NEAR_CLI_PATH || '/Users/manza/.cargo/bin/near';
 function nearCliCall(methodName: string, args: Record<string, unknown>, gas: string = '200 Tgas'): string {
   const argsJson = JSON.stringify(args);
   const argsB64 = Buffer.from(argsJson).toString('base64');
-  const cmd = `${NEAR_CLI} contract call-function as-transaction ${CONTRACT_ID} ${methodName} base64-args '${argsB64}' prepaid-gas '${gas}' attached-deposit '0 NEAR' sign-as ${SIGNER_ID} network-config testnet sign-with-keychain send`;
+  const cmd = `${NEAR_CLI} contract call-function as-transaction ${CONTRACT_ID} ${methodName} base64-args '${argsB64}' prepaid-gas '${gas}' attached-deposit '0 NEAR' sign-as ${SIGNER_ID} network-config ${NEAR_NETWORK} sign-with-keychain send`;
 
   console.log(`[CONTRACT] Calling ${methodName} with args (${argsJson.length} bytes)...`);
   try {
