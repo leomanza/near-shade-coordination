@@ -16,6 +16,7 @@ export default function LandingPage() {
 
       <Nav />
       <Hero />
+      <RoleSelect />
       <WhatIsThis />
       <HowItWorks />
       <WhyItMatters />
@@ -53,12 +54,26 @@ function Nav() {
           [github]
         </a>
         <Link
+          href="/worker"
+          className="text-xs px-4 py-2 rounded border border-zinc-800 text-zinc-500
+                     hover:border-zinc-600 hover:text-zinc-300 transition-all font-mono"
+        >
+          worker
+        </Link>
+        <Link
           href="/dashboard"
+          className="text-xs px-4 py-2 rounded border border-zinc-800 text-zinc-500
+                     hover:border-zinc-600 hover:text-zinc-300 transition-all font-mono"
+        >
+          dashboard
+        </Link>
+        <Link
+          href="/coordinator"
           className="text-xs px-4 py-2 rounded border border-[#00ff41]/20 text-[#00ff41]/80
                      hover:border-[#00ff41]/50 hover:text-[#00ff41] transition-all font-mono
                      hover:shadow-[0_0_12px_rgba(0,255,65,0.1)]"
         >
-          dashboard &gt;
+          coordinator &gt;
         </Link>
       </div>
     </nav>
@@ -102,12 +117,27 @@ function Hero() {
       <div className="animate-fade-in-up delay-400 flex flex-col sm:flex-row items-center justify-center gap-4">
         <Link
           href="/dashboard"
+          className="px-6 py-3 rounded bg-zinc-800 border border-zinc-700
+                     text-sm font-semibold text-zinc-300 font-mono
+                     hover:bg-zinc-700 hover:border-zinc-600 transition-all"
+        >
+          public dashboard
+        </Link>
+        <Link
+          href="/coordinator"
           className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30
                      text-sm font-semibold text-[#00ff41] font-mono
                      shadow-[0_0_20px_rgba(0,255,65,0.1)]
                      hover:bg-[#00ff41]/15 hover:shadow-[0_0_30px_rgba(0,255,65,0.2)] transition-all"
         >
-          open dashboard &gt;
+          coordinator &gt;
+        </Link>
+        <Link
+          href="/worker"
+          className="px-6 py-3 rounded border border-zinc-800 text-sm text-zinc-500 font-mono
+                     hover:border-zinc-600 hover:text-zinc-300 transition-all"
+        >
+          worker dashboard
         </Link>
         <a
           href="#what"
@@ -390,12 +420,27 @@ function CTAFooter() {
       <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
         <Link
           href="/dashboard"
+          className="px-6 py-3 rounded bg-zinc-800 border border-zinc-700
+                     text-sm font-semibold text-zinc-300 font-mono
+                     hover:bg-zinc-700 hover:border-zinc-600 transition-all"
+        >
+          public dashboard
+        </Link>
+        <Link
+          href="/coordinator"
           className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30
                      text-sm font-semibold text-[#00ff41] font-mono
                      shadow-[0_0_20px_rgba(0,255,65,0.1)]
                      hover:bg-[#00ff41]/15 hover:shadow-[0_0_30px_rgba(0,255,65,0.2)] transition-all"
         >
-          open dashboard &gt;
+          coordinator &gt;
+        </Link>
+        <Link
+          href="/worker"
+          className="px-6 py-3 rounded border border-zinc-800 text-sm text-zinc-500 font-mono
+                     hover:border-zinc-600 hover:text-zinc-300 transition-all"
+        >
+          worker dashboard
         </Link>
         <a
           href="https://github.com/pablomanza/near-shade-coordination"
@@ -412,6 +457,65 @@ function CTAFooter() {
         NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Nova SDK
       </p>
     </footer>
+  );
+}
+
+/* ─── Role Select ────────────────────────────────────────────────────────── */
+
+function RoleSelect() {
+  return (
+    <section className="relative z-10 px-6 md:px-10 py-12 max-w-5xl mx-auto">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <Link
+          href="/dashboard"
+          className="group rounded border border-zinc-800 bg-[#0a0f0a]/80 p-6 terminal-card
+                     hover:border-zinc-600 transition-all"
+        >
+          <div className="text-[10px] font-bold text-zinc-600 font-mono mb-2">
+            PUBLIC
+          </div>
+          <h3 className="text-sm font-semibold text-zinc-200 mb-2 font-mono group-hover:text-zinc-100 transition-colors">
+            Public Dashboard
+          </h3>
+          <p className="text-xs text-zinc-500 leading-relaxed">
+            View on-chain state, proposals, registered workers, and aggregate results.
+            No wallet required.
+          </p>
+        </Link>
+        <Link
+          href="/coordinator"
+          className="group rounded border border-[#00ff41]/10 bg-[#0a0f0a]/80 p-6 terminal-card
+                     hover:border-[#00ff41]/30 transition-all"
+        >
+          <div className="text-[10px] font-bold text-[#00ff41]/50 font-mono mb-2">
+            COORDINATOR
+          </div>
+          <h3 className="text-sm font-semibold text-zinc-200 mb-2 font-mono group-hover:text-[#00ff41] transition-colors">
+            Coordinator Dashboard
+          </h3>
+          <p className="text-xs text-zinc-500 leading-relaxed">
+            Submit proposals, manage workers, view aggregate tallies and on-chain state.
+            Requires coordinator wallet.
+          </p>
+        </Link>
+        <Link
+          href="/worker"
+          className="group rounded border border-zinc-800 bg-[#0a0f0a]/80 p-6 terminal-card
+                     hover:border-zinc-600 transition-all"
+        >
+          <div className="text-[10px] font-bold text-zinc-600 font-mono mb-2">
+            WORKER AGENT
+          </div>
+          <h3 className="text-sm font-semibold text-zinc-200 mb-2 font-mono group-hover:text-zinc-100 transition-colors">
+            Worker Dashboard
+          </h3>
+          <p className="text-xs text-zinc-500 leading-relaxed">
+            Connect your wallet to view your agent identity, accumulated knowledge,
+            voting history, and manage your preferences.
+          </p>
+        </Link>
+      </div>
+    </section>
   );
 }
 

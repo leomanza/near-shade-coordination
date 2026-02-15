@@ -1,0 +1,32 @@
+{
+  "name": "@near-shade-coordination/worker-agent",
+  "version": "1.0.0",
+  "description": "Worker agent for NEAR Shade Agent coordination (run multiple instances with different env vars)",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "dev": "DOTENV_CONFIG_PATH=.env.development.local tsx -r dotenv/config src/index.ts",
+    "dev:worker1": "DOTENV_CONFIG_PATH=.env.worker1.local tsx -r dotenv/config src/index.ts",
+    "dev:worker2": "DOTENV_CONFIG_PATH=.env.worker2.local tsx -r dotenv/config src/index.ts",
+    "dev:worker3": "DOTENV_CONFIG_PATH=.env.worker3.local tsx -r dotenv/config src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "docker:build": "sudo docker build --platform linux/amd64 -t manza/worker-agent:latest .",
+    "docker:build:no-cache": "sudo docker build --no-cache --platform linux/amd64 -t manza/worker-agent:latest .",
+    "docker:push": "sudo docker push manza/worker-agent"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.15.0",
+    "@near-shade-coordination/shared": "file:../shared",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "hono": "^4.8.4",
+    "nova-sdk-js": "^1.0.3",
+    "openai": "^6.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0"
+  }
+}

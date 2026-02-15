@@ -5,12 +5,25 @@ node_modules/
 frontend/.next/
 coordinator-contract/target/
 shared/dist/
+coordinator-agent/node_modules/
+coordinator-agent/dist/
+worker-agent/node_modules/
+worker-agent/dist/
+
+# Legacy (to be deleted)
+worker-agent-1/node_modules/
+worker-agent-2/node_modules/
+worker-agent-3/node_modules/
+worker-agent-1/dist/
+worker-agent-2/dist/
+worker-agent-3/dist/
 
 # Environment files with secrets
 .env
 .env.local
 .env.development.local
 *.env.development.local
+*.env.*.local
 frontend/.env.local
 
 # IDE / editor

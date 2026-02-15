@@ -1,14 +1,16 @@
-import { EnsueClient, createEnsueClient } from '../../../shared/src/ensue-client';
+import { EnsueClient, createEnsueClient } from '@near-shade-coordination/shared';
 import {
   MEMORY_KEYS,
-  getAllWorkerStatusKeys,
-  getAllWorkerResultKeys,
-} from '../../../shared/src/constants';
+  getWorkerKeys,
+  getProposalKeys,
+  getProposalWorkerKeys,
+  PROPOSAL_INDEX_KEY,
+} from '@near-shade-coordination/shared';
 import type {
   CoordinationRequest,
   WorkerResult,
   TallyResult,
-} from '../../../shared/src/types';
+} from '@near-shade-coordination/shared';
 import crypto from 'crypto';
 import {
   localStartCoordination,
@@ -30,6 +32,39 @@ const POLL_INTERVAL = Number(process.env.POLL_INTERVAL) || 5000;
 
 // Worker completion timeout (120 seconds - needs room for Nova load + AI inference + Nova record)
 const WORKER_TIMEOUT = 120000;
+
+/* ─── Dynamic Worker Configuration ───────────────────────────────────────── */
+
+interface WorkerConfig {
+  id: string;
+  url: string;
+}
+
+/**
+ * Get the list of configured workers from environment.
+ * Format: WORKERS=worker1:3001,worker2:3002,worker3:3003
+ * Falls back to the default 3 workers.
+ */
+function getWorkerConfigs(): WorkerConfig[] {
+  const workersEnv = process.env.WORKERS;
+  if (workersEnv) {
+    return workersEnv.split(',').map(entry => {
+      const [id, port] = entry.trim().split(':');
+      return { id, url: `http://localhost:${port}` };
+    });
+  }
+
+  // Default: 3 workers on ports 3001-3003
+  return [
+    { id: 'worker1', url: 'http://localhost:3001' },
+    { id: 'worker2', url: 'http://localhost:3002' },
+    { id: 'worker3', url: 'http://localhost:3003' },
+  ];
+}
+
+function getWorkerIds(): string[] {
+  return getWorkerConfigs().map(w => w.id);
+}
 
 /**
  * Start the coordination monitoring loop (production - polls contract)
@@ -103,11 +138,12 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
     }
 
     // Step 5: Record worker submissions on-chain (nullifier)
+    const workerIds = getWorkerIds();
     if (proposalId !== null) {
       await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'recording_submissions');
       console.log('[LOCAL] Recording worker submissions on-chain...');
 
-      const resultKeys = getAllWorkerResultKeys();
+      const resultKeys = workerIds.map(id => getWorkerKeys(id).RESULT);
       const workerResults = await getEnsueClient().readMultiple(resultKeys);
       // Only send worker_id + result_hash on-chain (nullifier).
       // Individual votes stay private in Ensue shared memory.
@@ -141,9 +177,13 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'aggregating');
     const tally = await aggregateResults(proposalId ?? 0);
 
-    // Write tally to Ensue
+    // Write tally to Ensue (ephemeral — for real-time UI)
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_TALLY, JSON.stringify(tally));
     console.log('\n[LOCAL] Aggregation complete:', JSON.stringify(tally, null, 2));
+
+    // Step 6b: Archive proposal to Ensue (persistent history)
+    const pid = proposalId?.toString() ?? `local-${Date.now()}`;
+    await archiveProposal(pid, taskConfig, tally, workerIds);
 
     // Step 7: Resume contract with on-chain settlement (privacy-preserving)
     if (proposalId !== null) {
@@ -194,13 +234,14 @@ async function checkLocalCoordination(): Promise<void> {
   }
 
   // Log active states
-  const statusKeys = getAllWorkerStatusKeys();
+  const workerIds = getWorkerIds();
+  const statusKeys = workerIds.map(id => getWorkerKeys(id).STATUS);
   const statuses = await getEnsueClient().readMultiple(statusKeys);
-  console.log('[LOCAL] Worker statuses:', {
-    worker1: statuses[MEMORY_KEYS.WORKER1_STATUS] || 'unknown',
-    worker2: statuses[MEMORY_KEYS.WORKER2_STATUS] || 'unknown',
-    worker3: statuses[MEMORY_KEYS.WORKER3_STATUS] || 'unknown',
-  });
+  const statusMap: Record<string, string> = {};
+  for (const id of workerIds) {
+    statusMap[id] = statuses[getWorkerKeys(id).STATUS] || 'unknown';
+  }
+  console.log('[LOCAL] Worker statuses:', statusMap);
 }
 
 /**
@@ -270,12 +311,13 @@ async function processCoordination(
     }
 
     // Record worker submissions on-chain (nullifier)
+    const workerIds = getWorkerIds();
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'recording_submissions');
     console.log('Recording worker submissions on-chain...');
 
     // Only send worker_id + result_hash on-chain (nullifier).
     // Individual votes stay private in Ensue shared memory.
-    const resultKeys = getAllWorkerResultKeys();
+    const resultKeys = workerIds.map(id => getWorkerKeys(id).RESULT);
     const workerResults = await getEnsueClient().readMultiple(resultKeys);
     const submissions = resultKeys
       .map(key => {
@@ -305,10 +347,13 @@ async function processCoordination(
     // Read and aggregate results
     const tally = await aggregateResults(proposalId);
 
-    // Write tally to Ensue
+    // Write tally to Ensue (ephemeral)
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_TALLY, JSON.stringify(tally));
 
     console.log('\nAggregation complete:', tally);
+
+    // Archive proposal to Ensue (persistent history)
+    await archiveProposal(proposalId.toString(), request.task_config, tally, workerIds);
 
     // Resume contract with results
     await resumeContractWithTally(proposalId, request, tally);
@@ -326,26 +371,22 @@ async function processCoordination(
 async function triggerWorkers(taskConfig: string): Promise<void> {
   console.log('\nTriggering workers...');
 
+  const workers = getWorkerConfigs();
+
   // Write task config to shared memory
   await getEnsueClient().updateMemory(MEMORY_KEYS.CONFIG_TASK_DEFINITION, taskConfig);
 
   // Reset all worker statuses to pending
-  await getEnsueClient().updateMemory(MEMORY_KEYS.WORKER1_STATUS, 'pending');
-  await getEnsueClient().updateMemory(MEMORY_KEYS.WORKER2_STATUS, 'pending');
-  await getEnsueClient().updateMemory(MEMORY_KEYS.WORKER3_STATUS, 'pending');
+  await Promise.all(
+    workers.map(w => getEnsueClient().updateMemory(getWorkerKeys(w.id).STATUS, 'pending'))
+  );
 
   // In local mode, trigger workers via HTTP
   if (LOCAL_MODE) {
-    const workerUrls = [
-      'http://localhost:3001',
-      'http://localhost:3002',
-      'http://localhost:3003',
-    ];
-
     const parsed = (() => { try { return JSON.parse(taskConfig); } catch { return { type: 'random' }; } })();
 
     await Promise.all(
-      workerUrls.map(async (url) => {
+      workers.map(async ({ id, url }) => {
         try {
           const res = await fetch(`${url}/api/task/execute`, {
             method: 'POST',
@@ -353,15 +394,15 @@ async function triggerWorkers(taskConfig: string): Promise<void> {
             body: JSON.stringify({ taskConfig: parsed }),
           });
           const data = await res.json();
-          console.log(`[LOCAL] Triggered ${url}:`, data);
+          console.log(`[LOCAL] Triggered ${id} (${url}):`, data);
         } catch (error) {
-          console.error(`[LOCAL] Failed to trigger ${url}:`, error);
+          console.error(`[LOCAL] Failed to trigger ${id} (${url}):`, error);
         }
       })
     );
   }
 
-  console.log('Workers triggered, task config written to Ensue');
+  console.log(`Workers triggered (${workers.length}), task config written to Ensue`);
 }
 
 /**
@@ -372,40 +413,32 @@ async function waitForWorkers(timeout: number): Promise<boolean> {
   console.log('\nMonitoring worker statuses...');
 
   const startTime = Date.now();
-  const statusKeys = getAllWorkerStatusKeys();
+  const workerIds = getWorkerIds();
+  const statusKeys = workerIds.map(id => getWorkerKeys(id).STATUS);
 
   while (Date.now() - startTime < timeout) {
     // Read all worker statuses from Ensue
     const statuses = await getEnsueClient().readMultiple(statusKeys);
 
-    const worker1Status = statuses[MEMORY_KEYS.WORKER1_STATUS];
-    const worker2Status = statuses[MEMORY_KEYS.WORKER2_STATUS];
-    const worker3Status = statuses[MEMORY_KEYS.WORKER3_STATUS];
+    const statusMap: Record<string, string> = {};
+    let allDone = true;
+    let anyFailed = false;
 
-    console.log('Worker statuses:', {
-      worker1: worker1Status || 'unknown',
-      worker2: worker2Status || 'unknown',
-      worker3: worker3Status || 'unknown',
-    });
-
-    // Check if all workers completed
-    if (
-      worker1Status === 'completed' &&
-      worker2Status === 'completed' &&
-      worker3Status === 'completed'
-    ) {
-      console.log('All workers completed!');
-      return true;
+    for (const id of workerIds) {
+      const status = statuses[getWorkerKeys(id).STATUS] || 'unknown';
+      statusMap[id] = status;
+      if (status !== 'completed' && status !== 'failed') allDone = false;
+      if (status === 'failed') anyFailed = true;
     }
 
-    // Check for failures
-    if (
-      worker1Status === 'failed' ||
-      worker2Status === 'failed' ||
-      worker3Status === 'failed'
-    ) {
-      console.error('One or more workers failed');
-      // Continue anyway to aggregate partial results
+    console.log('Worker statuses:', statusMap);
+
+    if (allDone) {
+      if (anyFailed) {
+        console.error('One or more workers failed');
+      } else {
+        console.log('All workers completed!');
+      }
       return true;
     }
 
@@ -424,8 +457,8 @@ async function waitForWorkers(timeout: number): Promise<boolean> {
 async function aggregateResults(proposalId: number): Promise<TallyResult> {
   console.log('\nAggregating worker results...');
 
-  // Read all worker results from Ensue
-  const resultKeys = getAllWorkerResultKeys();
+  const workerIds = getWorkerIds();
+  const resultKeys = workerIds.map(id => getWorkerKeys(id).RESULT);
   const results = await getEnsueClient().readMultiple(resultKeys);
 
   // Parse worker results
@@ -479,6 +512,58 @@ async function aggregateResults(proposalId: number): Promise<TallyResult> {
   };
 
   return tally;
+}
+
+/* ─── Proposal Archiving ─────────────────────────────────────────────────── */
+
+/**
+ * Archive a completed proposal to Ensue persistent history.
+ * Stores per-worker results and aggregate tally under proposal-scoped keys.
+ */
+async function archiveProposal(
+  proposalId: string,
+  taskConfig: string,
+  tally: TallyResult,
+  workerIds: string[],
+): Promise<void> {
+  console.log(`[archive] Archiving proposal ${proposalId}...`);
+  const client = getEnsueClient();
+
+  try {
+    const pKeys = getProposalKeys(proposalId);
+
+    // Archive config, tally, and status
+    await client.updateMemory(pKeys.CONFIG, taskConfig);
+    await client.updateMemory(pKeys.TALLY, JSON.stringify(tally));
+    await client.updateMemory(pKeys.STATUS, 'completed');
+
+    // Archive each worker's result
+    for (const workerId of workerIds) {
+      const ephResult = await client.readMemory(getWorkerKeys(workerId).RESULT);
+      if (ephResult) {
+        const wKeys = getProposalWorkerKeys(proposalId, workerId);
+        await client.updateMemory(wKeys.RESULT, ephResult);
+        await client.updateMemory(wKeys.TIMESTAMP, new Date().toISOString());
+      }
+    }
+
+    // Update proposal index
+    let index: string[] = [];
+    try {
+      const existing = await client.readMemory(PROPOSAL_INDEX_KEY);
+      if (existing) index = JSON.parse(existing);
+    } catch { /* first proposal */ }
+
+    if (!index.includes(proposalId)) {
+      index.push(proposalId);
+      await client.updateMemory(PROPOSAL_INDEX_KEY, JSON.stringify(index));
+    }
+
+    console.log(`[archive] Proposal ${proposalId} archived (${workerIds.length} workers)`);
+  } catch (error) {
+    console.error(`[archive] Failed to archive proposal ${proposalId}:`, error);
+    // Non-fatal — coordination still succeeded
+  }
 }
 
 /**

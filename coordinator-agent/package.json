@@ -15,6 +15,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.15.0",
+    "@near-shade-coordination/shared": "file:../shared",
     "@neardefi/shade-agent-js": "^1.0.1",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",

@@ -1,6 +1,131 @@
 import { NovaSdk, NovaError } from 'nova-sdk-js';
+import { sleep, jitter } from '@near-shade-coordination/shared';
+import * as crypto from 'crypto';
 
 const WORKER_ID = process.env.WORKER_ID || 'worker1';
+
+/* ─── Robustness & Concurrency Control ────────────────────────────────────── */
+
+interface RetryOptions {
+  maxRetries?: number;
+  baseDelay?: number;
+  maxDelay?: number;
+  onRetry?: (error: any, attempt: number) => void;
+}
+
+/**
+ * Execute a task with exponential backoff and jitter.
+ */
+async function withRetry<T>(
+  task: () => Promise<T>,
+  options: RetryOptions = {}
+): Promise<T> {
+  const {
+    maxRetries = 5,
+    baseDelay = 1000,
+    maxDelay = 10000,
+    onRetry,
+  } = options;
+
+  let attempt = 0;
+  while (true) {
+    try {
+      return await task();
+    } catch (error: any) {
+      attempt++;
+      if (attempt > maxRetries) throw error;
+
+      // Extract details if it's a Nova/Axios error
+      const status = error?.status || error?.cause?.response?.status;
+      const responseData = error?.cause?.response?.data || error?.message;
+
+      // Log the failure
+      if (onRetry) onRetry(error, attempt);
+      else {
+        const errorMsg = typeof responseData === 'object' ? JSON.stringify(responseData) : responseData;
+        console.warn(`[nova-robust] Attempt ${attempt} failed (status: ${status}): ${errorMsg}. Retrying...`);
+      }
+
+      // Calculate exponential backoff with jitter
+      const delay = Math.min(maxDelay, jitter(baseDelay * Math.pow(2, attempt - 1)));
+      await sleep(delay);
+    }
+  }
+}
+
+/**
+ * Re-implementation of AES-256-GCM encryption compatible with Nova.
+ */
+async function localEncryptData(data: Buffer, keyB64: string): Promise<string> {
+  const keyBytes = Buffer.from(keyB64, 'base64');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', keyBytes, iv);
+  const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  // Format: IV (12) + ciphertext + authTag (16)
+  const result = Buffer.concat([iv, encrypted, authTag]);
+  return result.toString('base64');
+}
+
+/**
+ * Re-implementation of SHA-256 hash compatible with Nova.
+ */
+function localComputeHash(data: Buffer): string {
+  return crypto.createHash('sha256').update(data).digest('hex');
+}
+
+/**
+ * Robust upload flow with internal pauses and step-level retries.
+ * Prevents nonce collisions and TEE timing issues.
+ */
+async function robustUpload(groupId: string, data: Buffer, filename: string): Promise<{ cid: string; trans_id: string }> {
+  const sdk = getSdk();
+  
+  // Step 1: Prepare Upload (Get Encryption Key)
+  console.log(`[nova-robust] Step 1: Preparing upload for ${filename}...`);
+  const prepareResult = await withRetry(async () => {
+    return (sdk as any).callMcpTool('prepare_upload', {
+      group_id: groupId,
+      filename,
+    });
+  });
+
+  const { upload_id, key } = prepareResult;
+
+  // DELIBERATE PAUSE: Allow the TEE and MCP state to settle 
+  // This reduces consistency errors between prepare and finalize.
+  const settleDelay = jitter(1000); 
+  await sleep(settleDelay);
+
+  // Step 2: Local Encryption & Hash
+  const encryptedB64 = await localEncryptData(data, key);
+  const fileHash = localComputeHash(data);
+
+  // Step 3: Finalize Upload
+  console.log(`[nova-robust] Step 2: Finalizing upload (ID: ${upload_id.substring(0, 8)})...`);
+  const finalizeResult = await withRetry(async () => {
+    try {
+      return await (sdk as any).callHttpEndpoint('/api/finalize-upload', {
+        upload_id,
+        encrypted_data: encryptedB64,
+        file_hash: fileHash,
+      });
+    } catch (e: any) {
+      // If we see a nonce/record failure, apply a longer specific backoff
+      const responseData = e?.cause?.response?.data;
+      if (typeof responseData === 'string' && responseData.includes('Record failed')) {
+        console.warn(`[nova-robust] Nonce collision detected in finalize. Applying penalty delay...`);
+        await sleep(2000); // 2s extra for the on-chain state to clear
+      }
+      throw e;
+    }
+  });
+
+  return {
+    cid: finalizeResult.cid,
+    trans_id: finalizeResult.trans_id
+  };
+}
 
 /**
  * Nova SDK client for persistent agent identity storage.
@@ -171,7 +296,10 @@ export async function uploadJson(filename: string, data: unknown): Promise<strin
   }
   const prefixed = prefixFilename(filename);
   const buf = Buffer.from(JSON.stringify(data, null, 2));
-  const result = await getSdk().upload(getGroupId(), buf, prefixed);
+  
+  // Use the robust upload flow instead of the standard SDK method
+  const result = await robustUpload(getGroupId(), buf, prefixed);
+  
   console.log(`[nova] Uploaded ${prefixed} -> CID: ${result.cid}`);
   return result.cid;
 }
@@ -281,7 +409,12 @@ export async function novaHealthInfo(): Promise<Record<string, unknown>> {
         group_id: groupId,
         filename: `${WORKER_ID}/health-check-probe.json`,
       });
-      result.prepareUploadTest = { status: 'ok', hasUploadId: !!uploadResult?.upload_id, hasKey: !!uploadResult?.key };
+      result.prepareUploadTest = { 
+        status: 'ok', 
+        hasUploadId: !!uploadResult?.upload_id, 
+        hasKey: !!uploadResult?.key,
+        fullResponse: uploadResult
+      };
     } catch (e) {
       result.prepareUploadTest = {
         status: 'failed',

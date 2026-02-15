@@ -81,34 +81,17 @@ export default function CoordinatorPanel({ status, online }: CoordinatorPanelPro
             </div>
           </div>
 
-          {/* Off-chain details (private / Ensue only) */}
+          {/* Off-chain note */}
           <div className="rounded-lg bg-zinc-800/40 border border-zinc-700/40 p-3">
-            <div className="flex items-center gap-2 mb-2">
+            <div className="flex items-center gap-2 mb-1">
               <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-zinc-700/60 text-zinc-400">
-                ENSUE ONLY
+                PRIVACY
               </span>
-              <span className="text-[10px] text-zinc-600">Private</span>
             </div>
-            <div className="space-y-1">
-              {tally.workers.map((w) => (
-                <div key={w.workerId} className="flex justify-between text-xs text-zinc-500">
-                  <span>{w.workerId}</span>
-                  <div className="flex items-center gap-2">
-                    {w.output.vote && (
-                      <span className={`text-[9px] font-semibold ${w.output.vote === "Approved" ? "text-green-400" : "text-red-400"}`}>
-                        {w.output.vote}
-                      </span>
-                    )}
-                    {!w.output.vote && (
-                      <span className="font-mono text-zinc-400">{w.output.value}</span>
-                    )}
-                    {w.processingTime && (
-                      <span className="text-zinc-600">{w.processingTime}ms</span>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
+            <p className="text-[10px] text-zinc-600">
+              Individual votes &amp; reasoning are private (Ensue/Nova). Only the aggregate tally is shown.
+              {tally.workerCount > 0 && ` ${tally.workerCount} agents participated.`}
+            </p>
           </div>
         </div>
       )}

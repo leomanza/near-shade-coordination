@@ -8,3 +8,4 @@
 export * from './constants';
 export * from './types';
 export * from './ensue-client';
+export * from './utils';

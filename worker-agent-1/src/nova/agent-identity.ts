@@ -318,6 +318,10 @@ export async function recordDecision(
 
   const filename = `history-${proposalId}.json`;
   cidRegistry[filename] = await uploadJson(filename, record);
+  
+  // Deliberate pause between decision record and registry update
+  await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 500));
+  
   await saveRegistry();
 
   console.log(`[nova-identity] Recorded decision for proposal ${proposalId}: ${vote}`);
@@ -338,6 +342,10 @@ export async function updateManifesto(
 
   const updated = { ...current, ...updates, agentId: WORKER_ID };
   cidRegistry['manifesto.json'] = await uploadJson('manifesto.json', updated);
+  
+  // Deliberate pause between manifesto update and registry update
+  await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 500));
+  
   await saveRegistry();
 
   console.log(`[nova-identity] Manifesto updated`);
@@ -369,6 +377,10 @@ export async function updatePreferences(
   current.updatedAt = new Date().toISOString();
 
   cidRegistry['preferences.json'] = await uploadJson('preferences.json', current);
+  
+  // Deliberate pause between preferences update and registry update
+  await new Promise(resolve => setTimeout(resolve, 1000 + Math.random() * 500));
+  
   await saveRegistry();
 
   console.log(`[nova-identity] Preferences updated`);

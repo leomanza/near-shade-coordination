@@ -145,6 +145,56 @@ export async function localRecordWorkerSubmissions(
   }
 }
 
+// ========== Worker Registration ==========
+
+/**
+ * Register a worker on-chain
+ */
+export async function localRegisterWorker(
+  workerId: string,
+  accountId?: string
+): Promise<boolean> {
+  try {
+    nearCliCall('register_worker', {
+      worker_id: workerId,
+      account_id: accountId || null,
+    });
+    console.log(`[CONTRACT] register_worker succeeded: ${workerId}`);
+    return true;
+  } catch (error: any) {
+    console.error(`[CONTRACT] register_worker failed:`, (error.message || '').substring(0, 200));
+    return false;
+  }
+}
+
+/**
+ * Remove a worker from the on-chain registry
+ */
+export async function localRemoveWorker(workerId: string): Promise<boolean> {
+  try {
+    nearCliCall('remove_worker', { worker_id: workerId });
+    console.log(`[CONTRACT] remove_worker succeeded: ${workerId}`);
+    return true;
+  } catch (error: any) {
+    console.error(`[CONTRACT] remove_worker failed:`, (error.message || '').substring(0, 200));
+    return false;
+  }
+}
+
+/**
+ * Get registered workers from contract (view call)
+ */
+export async function localGetRegisteredWorkers(): Promise<any[]> {
+  return await localViewCall<any[]>('get_registered_workers', {}) ?? [];
+}
+
+/**
+ * Get active worker count from contract (view call)
+ */
+export async function localGetWorkerCount(): Promise<number> {
+  return await localViewCall<number>('get_worker_count', {}) ?? 0;
+}
+
 /**
  * Call coordinator_resume on the contract (settles on-chain)
  */

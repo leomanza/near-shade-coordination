@@ -1,6 +1,6 @@
-import { EnsueClient, createEnsueClient } from '../../../shared/src/ensue-client';
-import { MEMORY_KEYS, TaskStatus, getWorkerKeys } from '../../../shared/src/constants';
-import type { TaskConfig, WorkerResult, WorkerStatusInfo, VoteResult } from '../../../shared/src/types';
+import { EnsueClient, createEnsueClient } from '@near-shade-coordination/shared';
+import { MEMORY_KEYS, TaskStatus, getWorkerKeys } from '@near-shade-coordination/shared';
+import type { TaskConfig, WorkerResult, WorkerStatusInfo, VoteResult } from '@near-shade-coordination/shared';
 import { aiVote } from './ai-voter';
 import {
   initializeIdentity,

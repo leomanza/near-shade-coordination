@@ -1,16 +1,19 @@
 const COORDINATOR_URL = process.env.NEXT_PUBLIC_COORDINATOR_URL || "http://localhost:3000";
-const WORKER_URLS: Record<string, string> = {
-  worker1: process.env.NEXT_PUBLIC_WORKER1_URL || "http://localhost:3001",
-  worker2: process.env.NEXT_PUBLIC_WORKER2_URL || "http://localhost:3002",
-  worker3: process.env.NEXT_PUBLIC_WORKER3_URL || "http://localhost:3003",
-};
+
+/** Dynamic worker URLs - supports any number of workers */
+function getWorkerUrl(workerId: string): string {
+  // Check for env override: NEXT_PUBLIC_WORKER1_URL, etc.
+  const envKey = `NEXT_PUBLIC_${workerId.toUpperCase()}_URL`;
+  if (typeof window === "undefined") {
+    return process.env[envKey] || `http://localhost:${3000 + parseInt(workerId.replace("worker", "")) || 1}`;
+  }
+  // Client-side: default port mapping
+  const num = parseInt(workerId.replace("worker", ""));
+  return `http://localhost:${3000 + (num || 1)}`;
+}
 
 export interface WorkerStatuses {
-  workers: {
-    worker1: string;
-    worker2: string;
-    worker3: string;
-  };
+  workers: Record<string, string>;
   timestamp: string;
 }
 
@@ -80,9 +83,7 @@ export async function getCoordinatorHealth(): Promise<{ status: string } | null>
 }
 
 export async function getWorkerHealth(workerId: string): Promise<WorkerHealth | null> {
-  const url = WORKER_URLS[workerId];
-  if (!url) return null;
-  return safeFetch<WorkerHealth>(`${url}/api/task/health`);
+  return safeFetch<WorkerHealth>(`${getWorkerUrl(workerId)}/api/task/health`);
 }
 
 export async function triggerWorkerTask(
@@ -90,9 +91,7 @@ export async function triggerWorkerTask(
   taskType: string = "random",
   parameters?: Record<string, unknown>
 ): Promise<TaskExecuteResponse | null> {
-  const url = WORKER_URLS[workerId];
-  if (!url) return null;
-  return safeFetch<TaskExecuteResponse>(`${url}/api/task/execute`, {
+  return safeFetch<TaskExecuteResponse>(`${getWorkerUrl(workerId)}/api/task/execute`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -114,6 +113,77 @@ export async function triggerCoordination(
     body: JSON.stringify({
       taskConfig: { type: taskType, timeout: 3000 },
     }),
+  });
+}
+
+export async function triggerVote(
+  proposal: string
+): Promise<{ message: string } | null> {
+  return safeFetch(`${COORDINATOR_URL}/api/coordinate/trigger`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      taskConfig: { type: "vote", parameters: { proposal }, timeout: 30000 },
+    }),
+  });
+}
+
+// ── Proposal History ──
+
+export interface ProposalSummary {
+  proposalId: string;
+  status: string;
+  decision: string | null;
+  approved: number | null;
+  rejected: number | null;
+  workerCount: number | null;
+  timestamp: string | null;
+}
+
+export interface ProposalDetail {
+  proposalId: string;
+  status: string;
+  config: unknown;
+  tally: CoordinatorStatus["tally"];
+  workers: Record<string, { result: unknown; timestamp: string }>;
+}
+
+export async function getProposalHistory(): Promise<{ proposals: ProposalSummary[]; total: number } | null> {
+  return safeFetch(`${COORDINATOR_URL}/api/coordinate/proposals`);
+}
+
+export async function getProposalDetail(proposalId: string): Promise<ProposalDetail | null> {
+  return safeFetch(`${COORDINATOR_URL}/api/coordinate/proposals/${proposalId}`);
+}
+
+// ── Worker Registration (on-chain) ──
+
+export interface RegisteredWorker {
+  worker_id: string;
+  account_id: string | null;
+  registered_at: number;
+  registered_by: string;
+  active: boolean;
+}
+
+export async function getRegisteredWorkers(): Promise<{ workers: RegisteredWorker[]; activeCount: number } | null> {
+  return safeFetch(`${COORDINATOR_URL}/api/coordinate/workers/registered`);
+}
+
+export async function registerWorker(
+  workerId: string,
+  accountId?: string
+): Promise<{ message: string } | null> {
+  return safeFetch(`${COORDINATOR_URL}/api/coordinate/workers/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ workerId, accountId }),
+  });
+}
+
+export async function removeWorker(workerId: string): Promise<{ message: string } | null> {
+  return safeFetch(`${COORDINATOR_URL}/api/coordinate/workers/${workerId}`, {
+    method: "DELETE",
   });
 }
 
@@ -182,15 +252,17 @@ export interface OnChainState {
   currentProposalId: number;
   proposals: Array<{ proposalId: number; proposal: OnChainProposal }>;
   manifesto: Manifesto | null;
+  registeredWorkers: RegisteredWorker[];
 }
 
 export async function getOnChainState(): Promise<OnChainState | null> {
   try {
-    const [owner, proposalId, allProposals, manifesto] = await Promise.all([
+    const [owner, proposalId, allProposals, manifesto, workers] = await Promise.all([
       nearViewCall<string>("get_owner"),
       nearViewCall<number>("get_current_proposal_id"),
       nearViewCall<Array<[number, OnChainProposal]>>("get_all_proposals"),
       nearViewCall<Manifesto>("get_manifesto"),
+      nearViewCall<RegisteredWorker[]>("get_registered_workers"),
     ]);
     if (owner === null || proposalId === null) return null;
     return {
@@ -201,6 +273,7 @@ export async function getOnChainState(): Promise<OnChainState | null> {
         proposal,
       })),
       manifesto: manifesto ?? null,
+      registeredWorkers: workers ?? [],
     };
   } catch {
     return null;
@@ -240,9 +313,7 @@ export interface AgentIdentity {
 }
 
 export async function getAgentIdentity(workerId: string): Promise<AgentIdentity | null> {
-  const url = WORKER_URLS[workerId];
-  if (!url) return null;
-  return safeFetch<AgentIdentity>(`${url}/api/knowledge/identity`);
+  return safeFetch<AgentIdentity>(`${getWorkerUrl(workerId)}/api/knowledge/identity`);
 }
 
 export async function feedKnowledge(
@@ -250,9 +321,7 @@ export async function feedKnowledge(
   notes?: string[],
   votingWeights?: Record<string, number>,
 ): Promise<{ message: string; preferences: AgentPreferences } | null> {
-  const url = WORKER_URLS[workerId];
-  if (!url) return null;
-  return safeFetch(`${url}/api/knowledge/feed`, {
+  return safeFetch(`${getWorkerUrl(workerId)}/api/knowledge/feed`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ notes, votingWeights }),
@@ -263,23 +332,9 @@ export async function updateAgentManifesto(
   workerId: string,
   updates: Partial<Omit<AgentManifesto, "agentId">>,
 ): Promise<{ message: string; manifesto: AgentManifesto } | null> {
-  const url = WORKER_URLS[workerId];
-  if (!url) return null;
-  return safeFetch(`${url}/api/knowledge/manifesto`, {
+  return safeFetch(`${getWorkerUrl(workerId)}/api/knowledge/manifesto`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(updates),
-  });
-}
-
-export async function triggerVote(
-  proposal: string
-): Promise<{ message: string } | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/trigger`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      taskConfig: { type: "vote", parameters: { proposal }, timeout: 30000 },
-    }),
   });
 }

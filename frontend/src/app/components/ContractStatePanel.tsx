@@ -117,7 +117,7 @@ export default function ContractStatePanel() {
 
           {/* Stats bar */}
           <div className="grid grid-cols-4 gap-2">
-            <Stat label="Total" value={String(state.currentProposalId)} />
+            <Stat label="Total" value={String(proposals.length)} />
             <Stat
               label="Created"
               value={String(countByState("Created"))}

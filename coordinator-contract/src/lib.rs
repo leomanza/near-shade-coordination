@@ -20,9 +20,10 @@ pub enum StorageKey {
     // orphaned IterableMap/IterableSet entries at the old prefix, so we must
     // advance to fresh ordinals every time.
     _Dep0, _Dep1, _Dep2, _Dep3, _Dep4, _Dep5, _Dep6,
-    ApprovedCodehashes,    // ordinal 7
+    ApprovedCodehashes,     // ordinal 7
     CoordinatorByAccountId, // ordinal 8
     Proposals,              // ordinal 9
+    RegisteredWorkers,      // ordinal 10
 }
 
 /// Proposal lifecycle states
@@ -43,12 +44,23 @@ pub struct Manifesto {
     pub hash: String,
 }
 
-/// Worker/coordinator registration information
+/// Worker/coordinator registration information (TEE attestation)
 #[near(serializers = [json, borsh])]
 #[derive(Clone)]
 pub struct Worker {
     pub checksum: String,
     pub codehash: String,
+}
+
+/// Registered worker agent that can participate in governance
+#[near(serializers = [json, borsh])]
+#[derive(Clone)]
+pub struct RegisteredWorker {
+    pub worker_id: String,
+    pub account_id: Option<AccountId>,
+    pub registered_at: u64,
+    pub registered_by: AccountId,
+    pub active: bool,
 }
 
 /// Input format for recording worker submissions (nullifier only — no vote data on-chain)
@@ -93,6 +105,7 @@ pub struct CoordinatorContract {
     pub current_proposal_id: u64,
     pub proposals: IterableMap<u64, Proposal>,
     pub manifesto: Option<Manifesto>,
+    pub registered_workers: IterableMap<String, RegisteredWorker>,
 }
 
 #[near]
@@ -108,6 +121,33 @@ impl CoordinatorContract {
             current_proposal_id: 0,
             proposals: IterableMap::new(StorageKey::Proposals),
             manifesto: None,
+            registered_workers: IterableMap::new(StorageKey::RegisteredWorkers),
+        }
+    }
+
+    /// Migrate from previous version (adds registered_workers field).
+    /// Reads old state (without registered_workers), preserves all data,
+    /// and adds the new field.
+    #[private]
+    pub fn migrate(&mut self) {
+        // This is a no-op if already migrated — the method just needs to
+        // exist so we can call it after deploying new code.
+        // The actual migration happens through #[init(ignore_state)] below.
+    }
+
+    /// Re-initialize from scratch, preserving IterableMap data at same storage prefixes.
+    /// Call this after deploying new code when state deserialization fails.
+    #[init(ignore_state)]
+    #[private]
+    pub fn force_migrate(owner: AccountId, current_proposal_id: u64) -> Self {
+        Self {
+            owner,
+            approved_codehashes: IterableSet::new(StorageKey::ApprovedCodehashes),
+            coordinator_by_account_id: IterableMap::new(StorageKey::CoordinatorByAccountId),
+            current_proposal_id,
+            proposals: IterableMap::new(StorageKey::Proposals),
+            manifesto: None, // Will need to be re-set via set_manifesto
+            registered_workers: IterableMap::new(StorageKey::RegisteredWorkers),
         }
     }
 
@@ -214,6 +254,17 @@ impl CoordinatorContract {
         );
 
         for sub in submissions {
+            // Validate worker is registered and active
+            let registered = self
+                .registered_workers
+                .get(&sub.worker_id)
+                .map(|w| w.active)
+                .unwrap_or(false);
+            require!(
+                registered,
+                format!("Worker {} is not registered or not active", sub.worker_id)
+            );
+
             // NULLIFIER: reject if this worker already submitted for this proposal
             let already = proposal
                 .worker_submissions
@@ -410,6 +461,32 @@ impl CoordinatorContract {
             .collect()
     }
 
+    pub fn get_registered_workers(&self) -> Vec<RegisteredWorker> {
+        self.registered_workers.values().cloned().collect()
+    }
+
+    pub fn get_active_workers(&self) -> Vec<RegisteredWorker> {
+        self.registered_workers
+            .values()
+            .filter(|w| w.active)
+            .cloned()
+            .collect()
+    }
+
+    pub fn is_worker_registered(&self, worker_id: String) -> bool {
+        self.registered_workers
+            .get(&worker_id)
+            .map(|w| w.active)
+            .unwrap_or(false)
+    }
+
+    pub fn get_worker_count(&self) -> u32 {
+        self.registered_workers
+            .values()
+            .filter(|w| w.active)
+            .count() as u32
+    }
+
     pub fn get_owner(&self) -> AccountId {
         self.owner.clone()
     }
@@ -458,6 +535,57 @@ impl CoordinatorContract {
         self.require_owner();
         self.proposals.remove(&proposal_id);
         env::log_str(&format!("Cleared proposal #{}", proposal_id));
+    }
+
+    // ========== WORKER REGISTRATION ==========
+
+    /// Register a worker that can participate in governance voting.
+    /// Only owner or an approved coordinator can call this.
+    pub fn register_worker(&mut self, worker_id: String, account_id: Option<AccountId>) {
+        let caller = env::predecessor_account_id();
+        require!(
+            caller == self.owner || self.coordinator_by_account_id.contains_key(&caller),
+            "Only owner or registered coordinator can register workers"
+        );
+
+        let worker = RegisteredWorker {
+            worker_id: worker_id.clone(),
+            account_id,
+            registered_at: env::block_timestamp(),
+            registered_by: caller,
+            active: true,
+        };
+        self.registered_workers.insert(worker_id.clone(), worker);
+        env::log_str(&format!("Registered worker: {}", worker_id));
+    }
+
+    /// Remove a worker from the registry. Owner only.
+    pub fn remove_worker(&mut self, worker_id: String) {
+        self.require_owner();
+        self.registered_workers.remove(&worker_id);
+        env::log_str(&format!("Removed worker: {}", worker_id));
+    }
+
+    /// Deactivate a worker (keeps registration but prevents participation)
+    pub fn deactivate_worker(&mut self, worker_id: String) {
+        self.require_owner();
+        if let Some(worker) = self.registered_workers.get_mut(&worker_id) {
+            worker.active = false;
+            env::log_str(&format!("Deactivated worker: {}", worker_id));
+        } else {
+            env::panic_str(&format!("Worker {} not found", worker_id));
+        }
+    }
+
+    /// Reactivate a previously deactivated worker
+    pub fn activate_worker(&mut self, worker_id: String) {
+        self.require_owner();
+        if let Some(worker) = self.registered_workers.get_mut(&worker_id) {
+            worker.active = true;
+            env::log_str(&format!("Activated worker: {}", worker_id));
+        } else {
+            env::panic_str(&format!("Worker {} not found", worker_id));
+        }
     }
 
     pub fn transfer_ownership(&mut self, new_owner: AccountId) {

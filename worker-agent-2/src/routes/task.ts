@@ -1,6 +1,6 @@
 import { Hono } from 'hono';
 import { executeTask, getTaskStatus } from '../workers/task-handler';
-import type { TaskConfig } from '../../../shared/src/types';
+import type { TaskConfig } from '@near-shade-coordination/shared';
 
 const app = new Hono();
 

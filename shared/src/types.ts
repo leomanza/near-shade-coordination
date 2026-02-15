@@ -1,4 +1,4 @@
-import { TaskStatus, CoordinatorStatus, WorkerId } from './constants';
+import { TaskStatus, CoordinatorStatus } from './constants';
 
 /**
  * AI vote result from a worker agent
@@ -14,7 +14,7 @@ export interface VoteResult {
  * Worker task result structure
  */
 export interface WorkerResult {
-  workerId: WorkerId;
+  workerId: string;
   taskType: string;
   output: {
     value: number;
@@ -114,7 +114,7 @@ export interface CoordinationRequest {
  * Worker status information
  */
 export interface WorkerStatusInfo {
-  workerId: WorkerId;
+  workerId: string;
   status: TaskStatus;
   timestamp?: number;
   error?: string;

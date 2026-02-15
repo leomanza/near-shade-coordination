@@ -1,6 +1,6 @@
 import { OpenAI } from 'openai';
 import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
-import type { VoteResult } from '../../../shared/src/types';
+import type { VoteResult } from '@near-shade-coordination/shared';
 
 /**
  * AI voter module — calls NEAR AI API to vote on proposals based on manifesto alignment.

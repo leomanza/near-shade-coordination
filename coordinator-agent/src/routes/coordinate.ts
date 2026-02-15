@@ -1,7 +1,19 @@
 import { Hono } from 'hono';
-import { EnsueClient, createEnsueClient } from '../../../shared/src/ensue-client';
-import { MEMORY_KEYS, getAllWorkerStatusKeys } from '../../../shared/src/constants';
+import { EnsueClient, createEnsueClient } from '@near-shade-coordination/shared';
+import {
+  MEMORY_KEYS,
+  getWorkerKeys,
+  getProposalKeys,
+  getProposalWorkerKeys,
+  PROPOSAL_INDEX_KEY,
+} from '@near-shade-coordination/shared';
 import { triggerLocalCoordination } from '../monitor/memory-monitor';
+import {
+  localRegisterWorker,
+  localRemoveWorker,
+  localGetRegisteredWorkers,
+  localGetWorkerCount,
+} from '../contract/local-contract';
 
 const LOCAL_MODE = process.env.LOCAL_MODE === 'true';
 const app = new Hono();
@@ -10,6 +22,15 @@ let _ensueClient: EnsueClient | null = null;
 function getEnsueClient(): EnsueClient {
   if (!_ensueClient) _ensueClient = createEnsueClient();
   return _ensueClient;
+}
+
+/** Parse WORKERS env (same format as memory-monitor) */
+function getWorkerIds(): string[] {
+  const workersEnv = process.env.WORKERS;
+  if (workersEnv) {
+    return workersEnv.split(',').map(entry => entry.trim().split(':')[0]);
+  }
+  return ['worker1', 'worker2', 'worker3'];
 }
 
 /**
@@ -46,15 +67,17 @@ app.get('/status', async (c) => {
  */
 app.get('/workers', async (c) => {
   try {
-    const statusKeys = getAllWorkerStatusKeys();
+    const workerIds = getWorkerIds();
+    const statusKeys = workerIds.map(id => getWorkerKeys(id).STATUS);
     const statuses = await getEnsueClient().readMultiple(statusKeys);
 
+    const workers: Record<string, string> = {};
+    for (const id of workerIds) {
+      workers[id] = statuses[getWorkerKeys(id).STATUS] || 'unknown';
+    }
+
     return c.json({
-      workers: {
-        worker1: statuses[MEMORY_KEYS.WORKER1_STATUS] || 'unknown',
-        worker2: statuses[MEMORY_KEYS.WORKER2_STATUS] || 'unknown',
-        worker3: statuses[MEMORY_KEYS.WORKER3_STATUS] || 'unknown',
-      },
+      workers,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -154,9 +177,10 @@ app.post('/reset', async (c) => {
     await getEnsueClient().clearPrefix('coordination/coordinator/');
 
     // Reset all worker statuses
-    await getEnsueClient().updateMemory(MEMORY_KEYS.WORKER1_STATUS, 'idle');
-    await getEnsueClient().updateMemory(MEMORY_KEYS.WORKER2_STATUS, 'idle');
-    await getEnsueClient().updateMemory(MEMORY_KEYS.WORKER3_STATUS, 'idle');
+    const workerIds = getWorkerIds();
+    await Promise.all(
+      workerIds.map(id => getEnsueClient().updateMemory(getWorkerKeys(id).STATUS, 'idle'))
+    );
 
     return c.json({
       message: 'Memory reset complete',
@@ -169,6 +193,171 @@ app.post('/reset', async (c) => {
         error: 'Failed to reset memory',
         details: error instanceof Error ? error.message : 'Unknown error',
       },
+      500
+    );
+  }
+});
+
+/* ─── Proposal History Endpoints ─────────────────────────────────────────── */
+
+/**
+ * GET /api/coordinate/proposals
+ * List all archived proposals from Ensue
+ */
+app.get('/proposals', async (c) => {
+  try {
+    const indexStr = await getEnsueClient().readMemory(PROPOSAL_INDEX_KEY);
+    const proposalIds: string[] = indexStr ? JSON.parse(indexStr) : [];
+
+    // Fetch summary for each proposal
+    const proposals = await Promise.all(
+      proposalIds.map(async (id) => {
+        const pKeys = getProposalKeys(id);
+        const [status, tallyStr] = await Promise.all([
+          getEnsueClient().readMemory(pKeys.STATUS),
+          getEnsueClient().readMemory(pKeys.TALLY),
+        ]);
+        const tally = tallyStr ? JSON.parse(tallyStr) : null;
+        return {
+          proposalId: id,
+          status: status || 'unknown',
+          decision: tally?.decision || null,
+          approved: tally?.approved ?? null,
+          rejected: tally?.rejected ?? null,
+          workerCount: tally?.workerCount ?? null,
+          timestamp: tally?.timestamp || null,
+        };
+      })
+    );
+
+    return c.json({ proposals, total: proposals.length });
+  } catch (error) {
+    console.error('Error listing proposals:', error);
+    return c.json(
+      { error: 'Failed to list proposals', details: error instanceof Error ? error.message : 'Unknown' },
+      500
+    );
+  }
+});
+
+/**
+ * GET /api/coordinate/proposals/:id
+ * Get full details for a specific archived proposal
+ */
+app.get('/proposals/:id', async (c) => {
+  try {
+    const proposalId = c.req.param('id');
+    const pKeys = getProposalKeys(proposalId);
+
+    const [configStr, status, tallyStr] = await Promise.all([
+      getEnsueClient().readMemory(pKeys.CONFIG),
+      getEnsueClient().readMemory(pKeys.STATUS),
+      getEnsueClient().readMemory(pKeys.TALLY),
+    ]);
+
+    if (!status) {
+      return c.json({ error: 'Proposal not found' }, 404);
+    }
+
+    const tally = tallyStr ? JSON.parse(tallyStr) : null;
+    const config = configStr ? (() => { try { return JSON.parse(configStr); } catch { return configStr; } })() : null;
+
+    // Fetch per-worker results
+    const workerIds = getWorkerIds();
+    const workerResults: Record<string, any> = {};
+    for (const workerId of workerIds) {
+      const wKeys = getProposalWorkerKeys(proposalId, workerId);
+      const [resultStr, timestamp] = await Promise.all([
+        getEnsueClient().readMemory(wKeys.RESULT),
+        getEnsueClient().readMemory(wKeys.TIMESTAMP),
+      ]);
+      if (resultStr) {
+        workerResults[workerId] = {
+          result: JSON.parse(resultStr),
+          timestamp,
+        };
+      }
+    }
+
+    return c.json({
+      proposalId,
+      status,
+      config,
+      tally,
+      workers: workerResults,
+    });
+  } catch (error) {
+    console.error('Error getting proposal details:', error);
+    return c.json(
+      { error: 'Failed to get proposal details', details: error instanceof Error ? error.message : 'Unknown' },
+      500
+    );
+  }
+});
+
+/* ─── Worker Registration Endpoints ──────────────────────────────────────── */
+
+/**
+ * GET /api/coordinate/workers/registered
+ * Get all registered workers from the on-chain contract
+ */
+app.get('/workers/registered', async (c) => {
+  try {
+    const workers = await localGetRegisteredWorkers();
+    const count = await localGetWorkerCount();
+    return c.json({ workers, activeCount: count });
+  } catch (error) {
+    console.error('Error getting registered workers:', error);
+    return c.json(
+      { error: 'Failed to get registered workers', details: error instanceof Error ? error.message : 'Unknown' },
+      500
+    );
+  }
+});
+
+/**
+ * POST /api/coordinate/workers/register
+ * Register a new worker on-chain
+ *
+ * Body: { workerId: string, accountId?: string }
+ */
+app.post('/workers/register', async (c) => {
+  try {
+    const { workerId, accountId } = await c.req.json();
+    if (!workerId) {
+      return c.json({ error: 'workerId is required' }, 400);
+    }
+
+    const success = await localRegisterWorker(workerId, accountId);
+    if (success) {
+      return c.json({ message: `Worker ${workerId} registered`, workerId, accountId: accountId || null });
+    }
+    return c.json({ error: `Failed to register worker ${workerId}` }, 500);
+  } catch (error) {
+    console.error('Error registering worker:', error);
+    return c.json(
+      { error: 'Failed to register worker', details: error instanceof Error ? error.message : 'Unknown' },
+      500
+    );
+  }
+});
+
+/**
+ * DELETE /api/coordinate/workers/:workerId
+ * Remove a worker from the on-chain registry
+ */
+app.delete('/workers/:workerId', async (c) => {
+  try {
+    const workerId = c.req.param('workerId');
+    const success = await localRemoveWorker(workerId);
+    if (success) {
+      return c.json({ message: `Worker ${workerId} removed` });
+    }
+    return c.json({ error: `Failed to remove worker ${workerId}` }, 500);
+  } catch (error) {
+    console.error('Error removing worker:', error);
+    return c.json(
+      { error: 'Failed to remove worker', details: error instanceof Error ? error.message : 'Unknown' },
       500
     );
   }
