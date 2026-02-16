@@ -1,6 +1,7 @@
 import { OpenAI } from 'openai';
 import type { ChatCompletionCreateParamsNonStreaming } from 'openai/resources/chat/completions';
-import type { VoteResult } from '@near-shade-coordination/shared';
+import type { VoteResult, VerificationProof, ModelAttestation } from '@near-shade-coordination/shared';
+import { randomBytes } from 'crypto';
 
 /**
  * AI voter module — calls NEAR AI API to vote on proposals based on manifesto alignment.
@@ -17,7 +18,11 @@ const SYSTEM_MESSAGE =
   'Provide both your vote (Approved or Rejected) and a clear explanation of your reasoning. ' +
   'You must keep responses under 10,000 characters.';
 
-export async function aiVote(manifesto: string, proposal: string, agentContext?: string): Promise<VoteResult> {
+export interface AiVoteResult extends VoteResult {
+  verificationProof?: VerificationProof;
+}
+
+export async function aiVote(manifesto: string, proposal: string, agentContext?: string): Promise<AiVoteResult> {
   const apiKey = process.env.NEAR_AI_API_KEY || process.env.NEAR_API_KEY;
   if (!apiKey) {
     throw new Error('NEAR_AI_API_KEY or NEAR_API_KEY environment variable is not set');
@@ -34,8 +39,10 @@ export async function aiVote(manifesto: string, proposal: string, agentContext?:
   }
   userMessage += `=== DAO MANIFESTO ===\n${manifesto}\n\n=== PROPOSAL ===\n${proposal}`;
 
+  const model = 'deepseek-ai/DeepSeek-V3.1';
+
   const request: ChatCompletionCreateParamsNonStreaming = {
-    model: 'deepseek-ai/DeepSeek-V3.1',
+    model,
     tools: [
       {
         type: 'function',
@@ -80,8 +87,117 @@ export async function aiVote(manifesto: string, proposal: string, agentContext?:
     throw new Error(`AI reasoning too long: ${rawResponse.reasoning.length} chars`);
   }
 
+  // Fetch NEAR AI verification proof (non-blocking — vote still valid without it)
+  let verificationProof: VerificationProof | undefined;
+  const chatId = completion.id;
+  if (chatId) {
+    try {
+      verificationProof = await fetchVerificationProof(chatId, model, apiKey);
+
+      // Fetch model attestation to link signing_address to TEE hardware
+      if (verificationProof) {
+        try {
+          const attestation = await fetchModelAttestation(model, apiKey);
+          verificationProof.attestation = attestation;
+        } catch (e) {
+          console.warn('[ai-voter] Failed to fetch model attestation (non-critical):', e);
+        }
+      }
+    } catch (e) {
+      console.warn('[ai-voter] Failed to fetch verification proof (non-critical):', e);
+    }
+  }
+
   return {
     vote: rawResponse.vote,
     reasoning: rawResponse.reasoning,
+    verificationProof,
+  };
+}
+
+/**
+ * Fetch NEAR AI model verification proof for a chat completion.
+ * See: https://docs.near.ai/cloud/verification/chat
+ *
+ * The proof contains:
+ * - text: "request_hash:response_hash" signed by the TEE running the model
+ * - signature: ECDSA signature verifiable with ethers.verifyMessage()
+ * - signing_address: TEE public key unique to the model
+ *
+ * This proves which model was used WITHOUT exposing the actual content.
+ */
+async function fetchVerificationProof(
+  chatId: string,
+  model: string,
+  apiKey: string,
+): Promise<VerificationProof> {
+  const url = `https://cloud-api.near.ai/v1/signature/${encodeURIComponent(chatId)}?model=${encodeURIComponent(model)}&signing_algo=ecdsa`;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Signature API returned ${res.status}: ${await res.text()}`);
+  }
+
+  const sig = await res.json() as {
+    text: string;
+    signature: string;
+    signing_address: string;
+    signing_algo: string;
+  };
+
+  // text format is "request_hash:response_hash"
+  const [requestHash, responseHash] = sig.text.split(':');
+
+  return {
+    chat_id: chatId,
+    model,
+    request_hash: requestHash,
+    response_hash: responseHash,
+    signature: sig.signature,
+    signing_address: sig.signing_address,
+    signing_algo: sig.signing_algo,
+    timestamp: Date.now(),
+  };
+}
+
+/**
+ * Fetch NEAR AI model attestation report.
+ * Links the signing_address back to verified TEE hardware (Intel TDX / NVIDIA).
+ *
+ * GET /v1/attestation/report?model={model}&signing_algo=ecdsa&nonce={random_hex}
+ *
+ * The attestation proves the model is running inside a genuine TEE environment,
+ * providing hardware-level trust for the AI inference.
+ */
+async function fetchModelAttestation(
+  model: string,
+  apiKey: string,
+): Promise<ModelAttestation> {
+  const nonce = randomBytes(16).toString('hex');
+  const url = `https://cloud-api.near.ai/v1/attestation/report?model=${encodeURIComponent(model)}&signing_algo=ecdsa&nonce=${nonce}`;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+
+  if (!res.ok) {
+    throw new Error(`Attestation API returned ${res.status}: ${await res.text()}`);
+  }
+
+  const report = await res.json() as {
+    signing_address: string;
+    attestation_report: string;
+    attestation_type?: string;
+  };
+
+  return {
+    signing_address: report.signing_address,
+    model,
+    nonce,
+    attestation_report: report.attestation_report,
+    attestation_type: report.attestation_type,
   };
 }

@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "ShadeBoard — Private Multi-Agent Governance on NEAR",
+  title: "Delibera — Private Multi-Agent Governance on NEAR",
   description:
     "Autonomous AI agents with persistent memory deliberate on DAO proposals privately. Individual reasoning stays off-chain. Only the collective decision settles on NEAR.",
 };
@@ -33,33 +33,20 @@ function Nav() {
   return (
     <nav className="relative z-10 flex items-center justify-between px-6 md:px-10 py-5 max-w-6xl mx-auto">
       <div className="flex items-center gap-3">
-        <div
-          className="h-8 w-8 rounded border border-[#00ff41]/30 bg-[#00ff41]/10
-                      flex items-center justify-center text-xs font-bold font-mono
-                      text-[#00ff41] text-glow-green"
-        >
-          S
-        </div>
+        <img src="/logo-iso.svg" alt="Delibera" className="h-8 w-8" />
         <span className="text-lg font-bold text-zinc-100 font-mono">
-          ShadeBoard
+          Delibera
         </span>
       </div>
       <div className="flex items-center gap-4">
         <a
-          href="https://github.com/pablomanza/near-shade-coordination"
+          href="https://github.com/leomanza/near-shade-coordination"
           target="_blank"
           rel="noopener noreferrer"
           className="text-xs text-zinc-600 hover:text-[#00ff41] transition-colors font-mono hidden sm:block"
         >
           [github]
         </a>
-        <Link
-          href="/worker"
-          className="text-xs px-4 py-2 rounded border border-zinc-800 text-zinc-500
-                     hover:border-zinc-600 hover:text-zinc-300 transition-all font-mono"
-        >
-          worker
-        </Link>
         <Link
           href="/dashboard"
           className="text-xs px-4 py-2 rounded border border-zinc-800 text-zinc-500
@@ -69,11 +56,18 @@ function Nav() {
         </Link>
         <Link
           href="/coordinator"
+          className="text-xs px-4 py-2 rounded border border-zinc-800 text-zinc-500
+                     hover:border-zinc-600 hover:text-zinc-300 transition-all font-mono"
+        >
+          coordinator
+        </Link>
+        <Link
+          href="/buy"
           className="text-xs px-4 py-2 rounded border border-[#00ff41]/20 text-[#00ff41]/80
                      hover:border-[#00ff41]/50 hover:text-[#00ff41] transition-all font-mono
                      hover:shadow-[0_0_12px_rgba(0,255,65,0.1)]"
         >
-          coordinator &gt;
+          deploy &gt;
         </Link>
       </div>
     </nav>
@@ -85,15 +79,6 @@ function Nav() {
 function Hero() {
   return (
     <section className="relative z-10 px-6 md:px-10 pt-20 pb-28 max-w-4xl mx-auto text-center">
-      {/* Terminal status line */}
-      <div
-        className="animate-fade-in-up inline-flex items-center gap-2 px-4 py-1.5 rounded
-                    bg-[#0a0f0a] border border-[#00ff41]/15 mb-8 text-xs font-mono text-[#00ff41]/70"
-      >
-        <span className="h-2 w-2 rounded-full bg-[#00ff41] animate-pulse-dot" />
-        3 agents online &middot; awaiting proposals
-      </div>
-
       <h1
         className="animate-fade-in-up delay-100 text-4xl md:text-6xl font-bold leading-tight mb-6 tracking-tight font-mono"
       >
@@ -116,6 +101,15 @@ function Hero() {
 
       <div className="animate-fade-in-up delay-400 flex flex-col sm:flex-row items-center justify-center gap-4">
         <Link
+          href="/buy"
+          className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30
+                     text-sm font-semibold text-[#00ff41] font-mono
+                     shadow-[0_0_20px_rgba(0,255,65,0.1)]
+                     hover:bg-[#00ff41]/15 hover:shadow-[0_0_30px_rgba(0,255,65,0.2)] transition-all"
+        >
+          deploy agent &gt;
+        </Link>
+        <Link
           href="/dashboard"
           className="px-6 py-3 rounded bg-zinc-800 border border-zinc-700
                      text-sm font-semibold text-zinc-300 font-mono
@@ -125,19 +119,10 @@ function Hero() {
         </Link>
         <Link
           href="/coordinator"
-          className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30
-                     text-sm font-semibold text-[#00ff41] font-mono
-                     shadow-[0_0_20px_rgba(0,255,65,0.1)]
-                     hover:bg-[#00ff41]/15 hover:shadow-[0_0_30px_rgba(0,255,65,0.2)] transition-all"
-        >
-          coordinator &gt;
-        </Link>
-        <Link
-          href="/worker"
           className="px-6 py-3 rounded border border-zinc-800 text-sm text-zinc-500 font-mono
                      hover:border-zinc-600 hover:text-zinc-300 transition-all"
         >
-          worker dashboard
+          coordinator
         </Link>
         <a
           href="#what"
@@ -161,12 +146,12 @@ function WhatIsThis() {
     >
       <SectionHeader
         tag="// OVERVIEW"
-        title="What is ShadeBoard?"
+        title="What is Delibera?"
       />
 
       <div className="animate-fade-in-up delay-200 rounded border border-[#00ff41]/10 bg-[#0a0f0a]/80 p-6 md:p-8 terminal-card">
         <p className="text-sm text-zinc-400 leading-relaxed mb-4">
-          ShadeBoard is a <span className="text-zinc-200">multi-agent deliberation and voting system</span> built
+          Delibera is a <span className="text-zinc-200">multi-agent deliberation and voting system</span> built
           on NEAR Protocol. Multiple autonomous AI agents independently analyze DAO proposals, reason through
           their implications, and cast private votes &mdash; all coordinated through encrypted shared memory.
         </p>
@@ -371,7 +356,7 @@ function TechStack() {
   const techs = [
     { name: "NEAR Protocol", role: "On-chain settlement & smart contracts" },
     { name: "NEAR AI", role: "AI model inference (DeepSeek V3.1)" },
-    { name: "Shade Agents", role: "TEE execution via Phala Network" },
+    { name: "Phala Network", role: "TEE execution & verifiable compute" },
     { name: "Ensue Network", role: "Encrypted shared memory layer" },
     { name: "Nova SDK", role: "Encrypted persistent agent storage" },
   ];
@@ -408,7 +393,7 @@ function CTAFooter() {
       <div className="hr-glow mb-16" />
 
       <div className="text-xs text-zinc-600 font-mono mb-4">
-        $ ./shadeboard --demo
+        $ ./delibera --demo
       </div>
       <h2 className="text-xl md:text-2xl font-bold mb-4 font-mono">
         See It in Action
@@ -419,6 +404,15 @@ function CTAFooter() {
 
       <div className="flex flex-col sm:flex-row items-center justify-center gap-4 mb-12">
         <Link
+          href="/buy"
+          className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30
+                     text-sm font-semibold text-[#00ff41] font-mono
+                     shadow-[0_0_20px_rgba(0,255,65,0.1)]
+                     hover:bg-[#00ff41]/15 hover:shadow-[0_0_30px_rgba(0,255,65,0.2)] transition-all"
+        >
+          deploy agent &gt;
+        </Link>
+        <Link
           href="/dashboard"
           className="px-6 py-3 rounded bg-zinc-800 border border-zinc-700
                      text-sm font-semibold text-zinc-300 font-mono
@@ -426,24 +420,8 @@ function CTAFooter() {
         >
           public dashboard
         </Link>
-        <Link
-          href="/coordinator"
-          className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30
-                     text-sm font-semibold text-[#00ff41] font-mono
-                     shadow-[0_0_20px_rgba(0,255,65,0.1)]
-                     hover:bg-[#00ff41]/15 hover:shadow-[0_0_30px_rgba(0,255,65,0.2)] transition-all"
-        >
-          coordinator &gt;
-        </Link>
-        <Link
-          href="/worker"
-          className="px-6 py-3 rounded border border-zinc-800 text-sm text-zinc-500 font-mono
-                     hover:border-zinc-600 hover:text-zinc-300 transition-all"
-        >
-          worker dashboard
-        </Link>
         <a
-          href="https://github.com/pablomanza/near-shade-coordination"
+          href="https://github.com/leomanza/near-shade-coordination"
           target="_blank"
           rel="noopener noreferrer"
           className="px-6 py-3 rounded border border-zinc-800 text-sm text-zinc-500 font-mono
@@ -454,7 +432,7 @@ function CTAFooter() {
       </div>
 
       <p className="text-[10px] text-zinc-700 font-mono">
-        NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Nova SDK
+        NEAR Protocol &middot; NEAR AI &middot; Phala TEE &middot; Ensue Network &middot; Nova SDK
       </p>
     </footer>
   );
@@ -465,7 +443,25 @@ function CTAFooter() {
 function RoleSelect() {
   return (
     <section className="relative z-10 px-6 md:px-10 py-12 max-w-5xl mx-auto">
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+        <Link
+          href="/buy"
+          className="group rounded border border-[#00ff41]/20 bg-[#0a0f0a]/80 p-6 terminal-card
+                     hover:border-[#00ff41]/40 transition-all
+                     shadow-[0_0_15px_rgba(0,255,65,0.05)]
+                     hover:shadow-[0_0_25px_rgba(0,255,65,0.1)]"
+        >
+          <div className="text-[10px] font-bold text-[#00ff41]/60 font-mono mb-2">
+            DEPLOY
+          </div>
+          <h3 className="text-sm font-semibold text-zinc-200 mb-2 font-mono group-hover:text-[#00ff41] transition-colors">
+            Deploy Agent
+          </h3>
+          <p className="text-xs text-zinc-500 leading-relaxed">
+            Deploy your own coordinator or worker agent to the Delibera platform.
+            Runs in Phala TEE.
+          </p>
+        </Link>
         <Link
           href="/dashboard"
           className="group rounded border border-zinc-800 bg-[#0a0f0a]/80 p-6 terminal-card
@@ -494,7 +490,7 @@ function RoleSelect() {
             Coordinator Dashboard
           </h3>
           <p className="text-xs text-zinc-500 leading-relaxed">
-            Submit proposals, manage workers, view aggregate tallies and on-chain state.
+            Submit proposals, manage workers, view aggregate tallies.
             Requires coordinator wallet.
           </p>
         </Link>
@@ -510,8 +506,7 @@ function RoleSelect() {
             Worker Dashboard
           </h3>
           <p className="text-xs text-zinc-500 leading-relaxed">
-            Connect your wallet to view your agent identity, accumulated knowledge,
-            voting history, and manage your preferences.
+            View agent identity, knowledge, voting history, and manage preferences.
           </p>
         </Link>
       </div>

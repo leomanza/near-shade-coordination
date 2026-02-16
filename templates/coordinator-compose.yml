@@ -1,0 +1,22 @@
+services:
+  coordinator:
+    image: leomanza/delibera-coordinator:latest
+    platform: linux/amd64
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - ENSUE_API_KEY=${ENSUE_API_KEY}
+      - ENSUE_TOKEN=${ENSUE_TOKEN}
+      # Shade Agent v2 config
+      - AGENT_CONTRACT_ID=${AGENT_CONTRACT_ID}
+      - SPONSOR_ACCOUNT_ID=${SPONSOR_ACCOUNT_ID}
+      - SPONSOR_PRIVATE_KEY=${SPONSOR_PRIVATE_KEY}
+      # Contract for view calls
+      - NEXT_PUBLIC_contractId=${AGENT_CONTRACT_ID}
+      - POLL_INTERVAL=5000
+      - NEAR_NETWORK=${NEAR_NETWORK}
+      - NEAR_RPC_JSON=${NEAR_RPC_JSON}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    restart: always

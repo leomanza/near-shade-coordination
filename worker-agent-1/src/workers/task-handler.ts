@@ -1,7 +1,8 @@
 import { EnsueClient, createEnsueClient } from '@near-shade-coordination/shared';
-import { MEMORY_KEYS, TaskStatus, getWorkerKeys } from '@near-shade-coordination/shared';
-import type { TaskConfig, WorkerResult, WorkerStatusInfo, VoteResult } from '@near-shade-coordination/shared';
+import { TaskStatus, getWorkerKeys } from '@near-shade-coordination/shared';
+import type { TaskConfig, WorkerResult, WorkerStatusInfo, VoteResult, VerificationProof } from '@near-shade-coordination/shared';
 import { aiVote } from './ai-voter';
+import type { AiVoteResult } from './ai-voter';
 import {
   initializeIdentity,
   loadIdentity,
@@ -18,7 +19,7 @@ function getEnsueClient(): EnsueClient {
 
 // Get worker ID from environment
 const WORKER_ID = process.env.WORKER_ID || 'worker1';
-const workerKeys = getWorkerKeys(WORKER_ID as any);
+const workerKeys = getWorkerKeys(WORKER_ID);
 
 /**
  * Execute a task and write results to Ensue
@@ -50,7 +51,7 @@ export async function executeTask(taskConfig: TaskConfig): Promise<void> {
 
     // Step 3: Build worker result
     const workerResult: WorkerResult = {
-      workerId: WORKER_ID as any,
+      workerId: WORKER_ID,
       taskType: taskConfig.type,
       output: {
         value: result.value,
@@ -67,6 +68,15 @@ export async function executeTask(taskConfig: TaskConfig): Promise<void> {
     // Step 4: Write result to Ensue
     await getEnsueClient().updateMemory(workerKeys.RESULT, JSON.stringify(workerResult));
     console.log(`[${WORKER_ID}] Result written to Ensue:`, workerResult);
+
+    // Step 4b: Store verification proof in Ensue (if available)
+    if (result.verificationProof) {
+      await getEnsueClient().updateMemory(
+        workerKeys.VERIFICATION_PROOF,
+        JSON.stringify(result.verificationProof),
+      );
+      console.log(`[${WORKER_ID}] Verification proof stored in Ensue`);
+    }
 
     // Step 5: Update timestamp
     await getEnsueClient().updateMemory(workerKeys.TIMESTAMP, Date.now().toString());
@@ -90,13 +100,14 @@ interface WorkResult {
   value: number;
   vote?: 'Approved' | 'Rejected';
   reasoning?: string;
+  verificationProof?: VerificationProof;
 }
 
 const NEAR_NETWORK = process.env.NEAR_NETWORK || 'testnet';
 const NEAR_RPC = process.env.NEAR_RPC_JSON
   || (NEAR_NETWORK === 'mainnet' ? 'https://rpc.fastnear.com' : 'https://test.rpc.fastnear.com');
 const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
-  || (NEAR_NETWORK === 'mainnet' ? 'coordinator.delibera.near' : 'ac-proxy.agents-coordinator.testnet');
+  || (NEAR_NETWORK === 'mainnet' ? 'coordinator.delibera.near' : 'coordinator.agents-coordinator.testnet');
 
 /**
  * Fetch the DAO manifesto from the contract via RPC view call
@@ -158,9 +169,13 @@ async function performWork(config: TaskConfig): Promise<WorkResult> {
       }
 
       console.log(`[${WORKER_ID}] Calling AI for vote on proposal...`);
-      const voteResult: VoteResult = await aiVote(manifesto.text, proposal, agentContext);
+      const voteResult: AiVoteResult = await aiVote(manifesto.text, proposal, agentContext);
       console.log(`[${WORKER_ID}] AI vote: ${voteResult.vote}`);
       console.log(`[${WORKER_ID}] AI reasoning: ${voteResult.reasoning.substring(0, 200)}...`);
+
+      if (voteResult.verificationProof) {
+        console.log(`[${WORKER_ID}] Verification proof obtained (chat_id: ${voteResult.verificationProof.chat_id})`);
+      }
 
       // Record decision to Nova for persistent history
       try {
@@ -176,6 +191,7 @@ async function performWork(config: TaskConfig): Promise<WorkResult> {
         value: voteResult.vote === 'Approved' ? 1 : 0,
         vote: voteResult.vote,
         reasoning: voteResult.reasoning,
+        verificationProof: voteResult.verificationProof,
       };
     }
 
@@ -216,7 +232,7 @@ export async function getTaskStatus(): Promise<WorkerStatusInfo> {
   const errorStr = await getEnsueClient().readMemory(workerKeys.ERROR);
 
   return {
-    workerId: WORKER_ID as any,
+    workerId: WORKER_ID,
     status: (statusStr as TaskStatus) || 'idle',
     timestamp: timestampStr ? parseInt(timestampStr) : undefined,
     error: errorStr || undefined,

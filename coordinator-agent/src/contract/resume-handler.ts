@@ -1,8 +1,8 @@
-import { agentCall } from '@neardefi/shade-agent-js';
+import { getAgent } from '../shade-client';
 
 /**
  * Resume the coordinator contract with aggregated results
- * Following verifiable-ai-dao/src/responder.ts:58-64
+ * Uses ShadeClient v2 agent.call() pattern
  */
 export async function resumeContract(
   proposalId: number,
@@ -13,8 +13,7 @@ export async function resumeContract(
   try {
     console.log(`\nCalling coordinator_resume on contract...`);
 
-    // Call the contract's coordinator_resume function
-    await agentCall({
+    await getAgent().call({
       methodName: 'coordinator_resume',
       args: {
         proposal_id: proposalId,
@@ -22,12 +21,11 @@ export async function resumeContract(
         config_hash: configHash,
         result_hash: resultHash,
       },
-      // Gas is handled automatically by SDK
     });
 
-    console.log(`✓ Successfully resumed contract for proposal #${proposalId}`);
+    console.log(`Successfully resumed contract for proposal #${proposalId}`);
   } catch (error) {
-    console.error(`✗ Failed to resume contract for proposal #${proposalId}:`, error);
+    console.error(`Failed to resume contract for proposal #${proposalId}:`, error);
     throw error;
   }
 }
@@ -37,14 +35,11 @@ export async function resumeContract(
  */
 export async function getFinalizedResult(proposalId: number): Promise<string | null> {
   try {
-    const { agentView } = await import('@neardefi/shade-agent-js');
-
-    const result = await agentView<string | null>({
+    const result = await getAgent().view<string>({
       methodName: 'get_finalized_coordination',
       args: { proposal_id: proposalId },
     });
-
-    return result;
+    return result ?? null;
   } catch (error) {
     console.error(`Failed to get finalized result for proposal #${proposalId}:`, error);
     return null;

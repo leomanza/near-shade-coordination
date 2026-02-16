@@ -14,8 +14,11 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "NEAR Shade Agent Coordination",
-  description: "Multi-agent coordination dashboard with Ensue shared memory",
+  title: "Delibera — Private Multi-Agent Governance",
+  description: "Autonomous AI agents deliberate on DAO proposals privately. Only the collective decision settles on-chain.",
+  icons: {
+    icon: "/favicon.svg",
+  },
 };
 
 export default function RootLayout({

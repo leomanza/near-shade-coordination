@@ -5,14 +5,12 @@ import {
   getWorkerKeys,
   getProposalKeys,
   getProposalWorkerKeys,
+  getAgentRegistryKeys,
   PROPOSAL_INDEX_KEY,
 } from '@near-shade-coordination/shared';
 import { triggerLocalCoordination } from '../monitor/memory-monitor';
 import {
-  localRegisterWorker,
-  localRemoveWorker,
   localGetRegisteredWorkers,
-  localGetWorkerCount,
 } from '../contract/local-contract';
 
 const LOCAL_MODE = process.env.LOCAL_MODE === 'true';
@@ -24,8 +22,16 @@ function getEnsueClient(): EnsueClient {
   return _ensueClient;
 }
 
-/** Parse WORKERS env (same format as memory-monitor) */
-function getWorkerIds(): string[] {
+/** Get worker IDs from on-chain contract, fall back to WORKERS env or defaults */
+async function getWorkerIds(): Promise<string[]> {
+  try {
+    const registered = await localGetRegisteredWorkers();
+    if (registered.length > 0) {
+      return registered.filter((w: any) => w.active).map((w: any) => w.worker_id);
+    }
+  } catch (e) {
+    console.warn('[coordinate] Could not fetch on-chain workers, falling back to env/defaults');
+  }
   const workersEnv = process.env.WORKERS;
   if (workersEnv) {
     return workersEnv.split(',').map(entry => entry.trim().split(':')[0]);
@@ -67,13 +73,30 @@ app.get('/status', async (c) => {
  */
 app.get('/workers', async (c) => {
   try {
-    const workerIds = getWorkerIds();
+    const workerIds = await getWorkerIds();
     const statusKeys = workerIds.map(id => getWorkerKeys(id).STATUS);
     const statuses = await getEnsueClient().readMultiple(statusKeys);
 
     const workers: Record<string, string> = {};
     for (const id of workerIds) {
-      workers[id] = statuses[getWorkerKeys(id).STATUS] || 'unknown';
+      const ensueStatus = statuses[getWorkerKeys(id).STATUS];
+      if (ensueStatus) {
+        workers[id] = ensueStatus;
+      } else {
+        // No Ensue status — probe the worker's endpoint to check if it's alive
+        try {
+          const endpointKey = getAgentRegistryKeys(id).ENDPOINT;
+          const endpoint = await getEnsueClient().readMemory(endpointKey);
+          if (endpoint) {
+            const res = await fetch(`${endpoint}/`, { signal: AbortSignal.timeout(3000) });
+            if (res.ok) {
+              workers[id] = 'idle';
+              continue;
+            }
+          }
+        } catch { /* probe failed */ }
+        workers[id] = 'offline';
+      }
     }
 
     return c.json({
@@ -177,7 +200,7 @@ app.post('/reset', async (c) => {
     await getEnsueClient().clearPrefix('coordination/coordinator/');
 
     // Reset all worker statuses
-    const workerIds = getWorkerIds();
+    const workerIds = await getWorkerIds();
     await Promise.all(
       workerIds.map(id => getEnsueClient().updateMemory(getWorkerKeys(id).STATUS, 'idle'))
     );
@@ -263,7 +286,7 @@ app.get('/proposals/:id', async (c) => {
     const config = configStr ? (() => { try { return JSON.parse(configStr); } catch { return configStr; } })() : null;
 
     // Fetch per-worker results
-    const workerIds = getWorkerIds();
+    const workerIds = await getWorkerIds();
     const workerResults: Record<string, any> = {};
     for (const workerId of workerIds) {
       const wKeys = getProposalWorkerKeys(proposalId, workerId);
@@ -290,74 +313,6 @@ app.get('/proposals/:id', async (c) => {
     console.error('Error getting proposal details:', error);
     return c.json(
       { error: 'Failed to get proposal details', details: error instanceof Error ? error.message : 'Unknown' },
-      500
-    );
-  }
-});
-
-/* ─── Worker Registration Endpoints ──────────────────────────────────────── */
-
-/**
- * GET /api/coordinate/workers/registered
- * Get all registered workers from the on-chain contract
- */
-app.get('/workers/registered', async (c) => {
-  try {
-    const workers = await localGetRegisteredWorkers();
-    const count = await localGetWorkerCount();
-    return c.json({ workers, activeCount: count });
-  } catch (error) {
-    console.error('Error getting registered workers:', error);
-    return c.json(
-      { error: 'Failed to get registered workers', details: error instanceof Error ? error.message : 'Unknown' },
-      500
-    );
-  }
-});
-
-/**
- * POST /api/coordinate/workers/register
- * Register a new worker on-chain
- *
- * Body: { workerId: string, accountId?: string }
- */
-app.post('/workers/register', async (c) => {
-  try {
-    const { workerId, accountId } = await c.req.json();
-    if (!workerId) {
-      return c.json({ error: 'workerId is required' }, 400);
-    }
-
-    const success = await localRegisterWorker(workerId, accountId);
-    if (success) {
-      return c.json({ message: `Worker ${workerId} registered`, workerId, accountId: accountId || null });
-    }
-    return c.json({ error: `Failed to register worker ${workerId}` }, 500);
-  } catch (error) {
-    console.error('Error registering worker:', error);
-    return c.json(
-      { error: 'Failed to register worker', details: error instanceof Error ? error.message : 'Unknown' },
-      500
-    );
-  }
-});
-
-/**
- * DELETE /api/coordinate/workers/:workerId
- * Remove a worker from the on-chain registry
- */
-app.delete('/workers/:workerId', async (c) => {
-  try {
-    const workerId = c.req.param('workerId');
-    const success = await localRemoveWorker(workerId);
-    if (success) {
-      return c.json({ message: `Worker ${workerId} removed` });
-    }
-    return c.json({ error: `Failed to remove worker ${workerId}` }, 500);
-  } catch (error) {
-    console.error('Error removing worker:', error);
-    return c.json(
-      { error: 'Failed to remove worker', details: error instanceof Error ? error.message : 'Unknown' },
       500
     );
   }

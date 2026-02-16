@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import Link from "next/link";
 import WorkerCard from "../components/WorkerCard";
 import StatusDot from "../components/StatusDot";
+import AgentEndpointConfig from "../components/AgentEndpointConfig";
 import { usePolling } from "@/lib/use-polling";
 import { useAuth } from "@/lib/auth";
 import {
@@ -105,6 +106,9 @@ export default function WorkerDashboard() {
         </span>
       </div>
 
+      {/* Agent Endpoint Config */}
+      <AgentEndpointConfig agentId={workerId} />
+
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
         {/* Own Identity (full WorkerCard with identity expansion) */}
         <WorkerCard
@@ -205,14 +209,8 @@ function PageShell({
         <header className="mb-8">
           <div className="flex items-center justify-between mb-2">
             <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-              <div
-                className="h-8 w-8 rounded border border-[#00ff41]/30 bg-[#00ff41]/10
-                            flex items-center justify-center text-xs font-bold font-mono
-                            text-[#00ff41] text-glow-green"
-              >
-                S
-              </div>
-              <h1 className="text-xl font-bold text-zinc-100 font-mono">ShadeBoard</h1>
+              <img src="/logo-iso.svg" alt="Delibera" className="h-8 w-8" />
+              <h1 className="text-xl font-bold text-zinc-100 font-mono">Delibera</h1>
             </Link>
             {accountId && onDisconnect && (
               <div className="flex items-center gap-2">
@@ -292,3 +290,4 @@ function FinalizedProposalRow({
     </div>
   );
 }
+

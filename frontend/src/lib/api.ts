@@ -1,15 +1,61 @@
-const COORDINATOR_URL = process.env.NEXT_PUBLIC_COORDINATOR_URL || "http://localhost:3000";
+// ── Protocol API (central, always-running) ──
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3005";
 
-/** Dynamic worker URLs - supports any number of workers */
+// ── Coordinator URL (dynamic, resolved from Ensue or env fallback) ──
+let _coordinatorUrl = process.env.NEXT_PUBLIC_COORDINATOR_URL || "http://localhost:3000";
+
+export function setActiveCoordinatorUrl(url: string) { _coordinatorUrl = url; }
+function getCoordinatorUrl(): string { return _coordinatorUrl; }
+
+/** In-memory cache of agent endpoints (fetched from Ensue via protocol API) */
+let _agentEndpointsCache: Record<string, string> = {};
+let _agentEndpointsFetchedAt = 0;
+const CACHE_TTL = 30_000; // 30s
+
+/** Fetch all agent endpoints from protocol API (Ensue-backed) */
+export async function fetchAgentEndpoints(): Promise<Record<string, { endpoint: string | null; cvmId: string | null; dashboardUrl: string | null }>> {
+  const res = await safeFetch<{ agents: Record<string, { endpoint: string | null; cvmId: string | null; dashboardUrl: string | null }> }>(
+    `${API_URL}/api/agents/endpoints`
+  );
+  if (res?.agents) {
+    _agentEndpointsCache = {};
+    for (const [id, info] of Object.entries(res.agents)) {
+      if (info.endpoint) _agentEndpointsCache[id] = info.endpoint;
+    }
+    _agentEndpointsFetchedAt = Date.now();
+    return res.agents;
+  }
+  return {};
+}
+
+/** Update a specific agent's endpoint URL (persisted to Ensue via protocol API) */
+export async function updateAgentEndpoint(agentId: string, endpoint: string, cvmId?: string, dashboardUrl?: string): Promise<boolean> {
+  const res = await safeFetch<{ success: boolean }>(
+    `${API_URL}/api/agents/${agentId}/endpoint`,
+    { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ endpoint, cvmId, dashboardUrl }) },
+    10000,
+  );
+  if (res?.success) {
+    _agentEndpointsCache[agentId] = endpoint;
+  }
+  return !!res?.success;
+}
+
+/** Dynamic worker URLs - checks Ensue-backed endpoints, falls back to localhost */
 function getWorkerUrl(workerId: string): string {
-  // Check for env override: NEXT_PUBLIC_WORKER1_URL, etc.
+  if (_agentEndpointsCache[workerId]) return _agentEndpointsCache[workerId];
   const envKey = `NEXT_PUBLIC_${workerId.toUpperCase()}_URL`;
   if (typeof window === "undefined") {
     return process.env[envKey] || `http://localhost:${3000 + parseInt(workerId.replace("worker", "")) || 1}`;
   }
-  // Client-side: default port mapping
   const num = parseInt(workerId.replace("worker", ""));
   return `http://localhost:${3000 + (num || 1)}`;
+}
+
+/** Ensure agent endpoints are loaded (call once on page load) */
+export async function ensureAgentEndpoints(): Promise<void> {
+  if (Date.now() - _agentEndpointsFetchedAt < CACHE_TTL) return;
+  await fetchAgentEndpoints();
 }
 
 export interface WorkerStatuses {
@@ -56,9 +102,9 @@ export interface TaskExecuteResponse {
   taskType: string;
 }
 
-async function safeFetch<T>(url: string, options?: RequestInit): Promise<T | null> {
+async function safeFetch<T>(url: string, options?: RequestInit, timeoutMs = 5000): Promise<T | null> {
   try {
-    const res = await fetch(url, { ...options, signal: AbortSignal.timeout(5000) });
+    const res = await fetch(url, { ...options, signal: AbortSignal.timeout(timeoutMs) });
     if (!res.ok) return null;
     return await res.json();
   } catch {
@@ -66,48 +112,32 @@ async function safeFetch<T>(url: string, options?: RequestInit): Promise<T | nul
   }
 }
 
+// ── Coordinator-specific API (dynamic URL) ──
+
 export async function getCoordinatorStatus(): Promise<CoordinatorStatus | null> {
-  return safeFetch<CoordinatorStatus>(`${COORDINATOR_URL}/api/coordinate/status`);
+  return safeFetch<CoordinatorStatus>(`${getCoordinatorUrl()}/api/coordinate/status`);
 }
 
 export async function getWorkerStatuses(): Promise<WorkerStatuses | null> {
-  return safeFetch<WorkerStatuses>(`${COORDINATOR_URL}/api/coordinate/workers`);
+  return safeFetch<WorkerStatuses>(`${getCoordinatorUrl()}/api/coordinate/workers`);
 }
 
 export async function getPendingCoordinations(): Promise<PendingCoordinations | null> {
-  return safeFetch<PendingCoordinations>(`${COORDINATOR_URL}/api/coordinate/pending`);
+  return safeFetch<PendingCoordinations>(`${getCoordinatorUrl()}/api/coordinate/pending`);
 }
 
 export async function getCoordinatorHealth(): Promise<{ status: string } | null> {
-  return safeFetch(`${COORDINATOR_URL}/`);
-}
-
-export async function getWorkerHealth(workerId: string): Promise<WorkerHealth | null> {
-  return safeFetch<WorkerHealth>(`${getWorkerUrl(workerId)}/api/task/health`);
-}
-
-export async function triggerWorkerTask(
-  workerId: string,
-  taskType: string = "random",
-  parameters?: Record<string, unknown>
-): Promise<TaskExecuteResponse | null> {
-  return safeFetch<TaskExecuteResponse>(`${getWorkerUrl(workerId)}/api/task/execute`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      taskConfig: { type: taskType, parameters, timeout: 3000 },
-    }),
-  });
+  return safeFetch(`${getCoordinatorUrl()}/`);
 }
 
 export async function resetMemory(): Promise<{ message: string } | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/reset`, { method: "POST" });
+  return safeFetch(`${getCoordinatorUrl()}/api/coordinate/reset`, { method: "POST" });
 }
 
 export async function triggerCoordination(
   taskType: string = "random"
 ): Promise<{ message: string } | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/trigger`, {
+  return safeFetch(`${getCoordinatorUrl()}/api/coordinate/trigger`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -119,7 +149,7 @@ export async function triggerCoordination(
 export async function triggerVote(
   proposal: string
 ): Promise<{ message: string } | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/trigger`, {
+  return safeFetch(`${getCoordinatorUrl()}/api/coordinate/trigger`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -128,7 +158,7 @@ export async function triggerVote(
   });
 }
 
-// ── Proposal History ──
+// ── Proposal History (coordinator-specific) ──
 
 export interface ProposalSummary {
   proposalId: string;
@@ -149,14 +179,34 @@ export interface ProposalDetail {
 }
 
 export async function getProposalHistory(): Promise<{ proposals: ProposalSummary[]; total: number } | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/proposals`);
+  return safeFetch(`${getCoordinatorUrl()}/api/coordinate/proposals`);
 }
 
 export async function getProposalDetail(proposalId: string): Promise<ProposalDetail | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/proposals/${proposalId}`);
+  return safeFetch(`${getCoordinatorUrl()}/api/coordinate/proposals/${proposalId}`);
 }
 
-// ── Worker Registration (on-chain) ──
+// ── Worker-level API (direct to worker instance) ──
+
+export async function getWorkerHealth(workerId: string): Promise<WorkerHealth | null> {
+  return safeFetch<WorkerHealth>(`${getWorkerUrl(workerId)}/api/task/health`);
+}
+
+export async function triggerWorkerTask(
+  workerId: string,
+  taskType: string = "random",
+  parameters?: Record<string, unknown>
+): Promise<TaskExecuteResponse | null> {
+  return safeFetch<TaskExecuteResponse>(`${getWorkerUrl(workerId)}/api/task/execute`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      taskConfig: { type: taskType, parameters, timeout: 3000 },
+    }),
+  });
+}
+
+// ── Worker Registration (protocol API → on-chain) ──
 
 export interface RegisteredWorker {
   worker_id: string;
@@ -167,14 +217,14 @@ export interface RegisteredWorker {
 }
 
 export async function getRegisteredWorkers(): Promise<{ workers: RegisteredWorker[]; activeCount: number } | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/workers/registered`);
+  return safeFetch(`${API_URL}/api/workers/registered`);
 }
 
 export async function registerWorker(
   workerId: string,
   accountId?: string
 ): Promise<{ message: string } | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/workers/register`, {
+  return safeFetch(`${API_URL}/api/workers/register`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ workerId, accountId }),
@@ -182,8 +232,31 @@ export async function registerWorker(
 }
 
 export async function removeWorker(workerId: string): Promise<{ message: string } | null> {
-  return safeFetch(`${COORDINATOR_URL}/api/coordinate/workers/${workerId}`, {
+  return safeFetch(`${API_URL}/api/workers/${workerId}`, {
     method: "DELETE",
+  });
+}
+
+// ── PingPay Checkout (protocol API) ──
+
+export interface CheckoutSessionResponse {
+  sessionUrl: string;
+  sessionId: string;
+  expiresAt?: string;
+}
+
+export async function createCheckoutSession(params: {
+  amount: string;
+  chain?: string;
+  symbol?: string;
+  successUrl: string;
+  cancelUrl: string;
+  metadata?: Record<string, unknown>;
+}): Promise<CheckoutSessionResponse | null> {
+  return safeFetch<CheckoutSessionResponse>(`${API_URL}/api/payments/checkout`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
   });
 }
 
@@ -194,7 +267,7 @@ const NEAR_RPC = NEAR_NETWORK === "mainnet"
   ? "https://rpc.fastnear.com"
   : "https://test.rpc.fastnear.com";
 const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
-  || (NEAR_NETWORK === "mainnet" ? "coordinator.delibera.near" : "ac-proxy.agents-coordinator.testnet");
+  || (NEAR_NETWORK === "mainnet" ? "coordinator.agents-coordinator.near" : "coordinator.agents-coordinator.testnet");
 
 async function nearViewCall<T>(method: string, args: Record<string, unknown> = {}): Promise<T | null> {
   try {
@@ -280,7 +353,110 @@ export async function getOnChainState(): Promise<OnChainState | null> {
   }
 }
 
-// ── Nova / Agent Identity API ──
+// ── Registry Contract (multi-coordinator/worker platform) ──
+
+const REGISTRY_CONTRACT_ID = process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID || "registry.agents-coordinator.testnet";
+
+async function registryViewCall<T>(method: string, args: Record<string, unknown> = {}): Promise<T | null> {
+  try {
+    const res = await fetch(NEAR_RPC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "1",
+        method: "query",
+        params: {
+          request_type: "call_function",
+          finality: "final",
+          account_id: REGISTRY_CONTRACT_ID,
+          method_name: method,
+          args_base64: btoa(JSON.stringify(args)),
+        },
+      }),
+    });
+    const data = await res.json();
+    if (data.error || !data.result?.result) return null;
+    const bytes = new Uint8Array(data.result.result);
+    const text = new TextDecoder().decode(bytes);
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+}
+
+export interface RegistryCoordinator {
+  coordinator_id: string;
+  owner: string;
+  contract_id: string | null;
+  phala_cvm_id: string | null;
+  ensue_configured: boolean;
+  created_at: number;
+  active: boolean;
+}
+
+export interface RegistryWorker {
+  worker_id: string;
+  owner: string;
+  coordinator_id: string | null;
+  phala_cvm_id: string | null;
+  nova_group_id: string | null;
+  created_at: number;
+  active: boolean;
+}
+
+export async function getActiveCoordinators(): Promise<RegistryCoordinator[] | null> {
+  return registryViewCall<RegistryCoordinator[]>("list_active_coordinators");
+}
+
+export async function getRegistryStats(): Promise<{
+  total_coordinators: number;
+  active_coordinators: number;
+  total_workers: number;
+  active_workers: number;
+} | null> {
+  return registryViewCall("get_stats");
+}
+
+// ── Phala Deployment (protocol API) ──
+
+export interface DeployRequest {
+  type: "coordinator" | "worker";
+  name: string;
+  phalaApiKey?: string;
+  ensueApiKey?: string;
+  ensueToken?: string;
+  nearAiApiKey?: string;
+  // Shade Agent v2 fields (coordinator)
+  agentContractId?: string;
+  sponsorAccountId?: string;
+  sponsorPrivateKey?: string;
+  nearNetwork?: string;
+  // Worker fields
+  novaApiKey?: string;
+  novaAccountId?: string;
+  novaGroupId?: string;
+  coordinatorId?: string;
+}
+
+export interface DeployResponse {
+  success: boolean;
+  cvmId?: string;
+  dashboardUrl?: string;
+  endpointUrl?: string;
+  name?: string;
+  error?: string;
+}
+
+export async function deployToPhala(params: DeployRequest): Promise<DeployResponse | null> {
+  return safeFetch<DeployResponse>(`${API_URL}/api/deploy`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  }, 60000);
+}
+
+// ── Nova / Agent Identity API (direct to worker) ──
 
 export interface AgentManifesto {
   agentId: string;

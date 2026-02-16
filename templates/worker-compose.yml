@@ -1,0 +1,21 @@
+services:
+  worker:
+    image: leomanza/delibera-worker:latest
+    platform: linux/amd64
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - WORKER_ID=${WORKER_ID}
+      - ENSUE_API_KEY=${ENSUE_API_KEY}
+      - ENSUE_TOKEN=${ENSUE_TOKEN}
+      - NEAR_AI_API_KEY=${NEAR_AI_API_KEY}
+      - NOVA_API_KEY=${NOVA_API_KEY}
+      - NOVA_ACCOUNT_ID=${NOVA_ACCOUNT_ID}
+      - NOVA_GROUP_ID=${NOVA_GROUP_ID}
+      - NEAR_NETWORK=mainnet
+      - NEAR_RPC_JSON=https://rpc.fastnear.com
+      - NEXT_PUBLIC_contractId=${CONTRACT_ID}
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    restart: always

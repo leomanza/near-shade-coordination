@@ -7,6 +7,7 @@ import EventLog, { type LogEntry } from "../components/EventLog";
 import StatusDot from "../components/StatusDot";
 import ProposalHistoryPanel from "../components/ProposalHistoryPanel";
 import WorkerManagementPanel from "../components/WorkerManagementPanel";
+import AgentEndpointConfig from "../components/AgentEndpointConfig";
 import { usePolling } from "@/lib/use-polling";
 import { useAuth } from "@/lib/auth";
 import {
@@ -105,14 +106,8 @@ function PageShell({
         <header className="mb-8">
           <div className="flex items-center justify-between mb-2">
             <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-              <div
-                className="h-8 w-8 rounded border border-[#00ff41]/30 bg-[#00ff41]/10
-                            flex items-center justify-center text-xs font-bold font-mono
-                            text-[#00ff41] text-glow-green"
-              >
-                S
-              </div>
-              <h1 className="text-xl font-bold text-zinc-100 font-mono">ShadeBoard</h1>
+              <img src="/logo-iso.svg" alt="Delibera" className="h-8 w-8" />
+              <h1 className="text-xl font-bold text-zinc-100 font-mono">Delibera</h1>
             </Link>
             {accountId && onDisconnect ? (
               <div className="flex items-center gap-2">
@@ -257,6 +252,9 @@ function CoordinatorContent() {
           </button>
         </div>
       </div>
+
+      {/* Coordinator Endpoint Config */}
+      <AgentEndpointConfig agentId="coordinator" />
 
       {/* Coordinator Panel + Worker Status Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-6">

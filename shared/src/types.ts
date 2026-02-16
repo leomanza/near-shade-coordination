@@ -158,3 +158,34 @@ export interface EnsueListResponse {
   keys: string[];
   total: number;
 }
+
+/**
+ * NEAR AI model verification proof.
+ * Cryptographic proof of which AI model was used for a vote,
+ * without exposing the actual vote content.
+ * See: https://docs.near.ai/cloud/verification/chat
+ */
+export interface VerificationProof {
+  chat_id: string;
+  model: string;
+  request_hash: string;
+  response_hash: string;
+  signature: string;
+  signing_address: string;
+  signing_algo: string;
+  timestamp: number;
+  attestation?: ModelAttestation;
+}
+
+/**
+ * NEAR AI model attestation report.
+ * Links a signing_address back to verified TEE hardware (Intel TDX / NVIDIA).
+ * See: https://docs.near.ai/cloud/verification/chat
+ */
+export interface ModelAttestation {
+  signing_address: string;
+  model: string;
+  nonce: string;
+  attestation_report: string;
+  attestation_type?: string;
+}

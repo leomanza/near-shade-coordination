@@ -13,7 +13,7 @@ const LOCAL_MODE = process.env.LOCAL_MODE === 'true';
 // Validate required environment variables
 const required = LOCAL_MODE
   ? ['ENSUE_API_KEY']
-  : ['ENSUE_API_KEY', 'NEAR_ACCOUNT_ID', 'NEAR_SEED_PHRASE', 'NEXT_PUBLIC_contractId'];
+  : ['ENSUE_API_KEY', 'AGENT_CONTRACT_ID', 'SPONSOR_ACCOUNT_ID', 'SPONSOR_PRIVATE_KEY'];
 
 for (const key of required) {
   if (!process.env[key]) {
@@ -33,7 +33,7 @@ app.get('/', (c) =>
     message: 'Coordinator Agent is running',
     status: 'healthy',
     localMode: LOCAL_MODE,
-    contractId: process.env.NEXT_PUBLIC_contractId || 'N/A (local mode)',
+    contractId: process.env.AGENT_CONTRACT_ID || process.env.NEXT_PUBLIC_contractId || 'N/A (local mode)',
     timestamp: new Date().toISOString(),
   })
 );
@@ -45,7 +45,7 @@ app.route('/api/coordinate', coordinateRoute);
 const port = Number(process.env.PORT || '3000');
 console.log('Coordinator Agent starting on port', port);
 console.log('Mode:', LOCAL_MODE ? 'LOCAL (no TEE/contract)' : 'PRODUCTION');
-console.log('Contract ID:', process.env.NEXT_PUBLIC_contractId || 'N/A');
+console.log('Contract ID:', process.env.AGENT_CONTRACT_ID || process.env.NEXT_PUBLIC_contractId || 'N/A');
 console.log('Ensue API configured:', process.env.ENSUE_API_KEY ? 'YES' : 'NO');
 
 serve({ fetch: app.fetch, port }, async (info) => {
@@ -57,21 +57,72 @@ serve({ fetch: app.fetch, port }, async (info) => {
     console.log('[LOCAL MODE] Use POST /api/coordinate/trigger to start a coordination\n');
     startLocalCoordinationLoop();
   } else {
-    // Wait for agent registration (following verifiable-ai-dao/src/index.ts:18-24)
-    const { agentInfo } = await import('@neardefi/shade-agent-js');
-    console.log('\nWaiting for agent registration...');
+    // Initialize ShadeClient (v2 pattern from shade-agent-template 2.0)
+    const { ShadeClient } = await import('@neardefi/shade-agent-js');
+    const { setAgent } = await import('./shade-client');
+
+    const networkId = (process.env.NEAR_NETWORK || 'testnet') as 'testnet' | 'mainnet';
+    const agentContractId = process.env.AGENT_CONTRACT_ID!;
+    const sponsorAccountId = process.env.SPONSOR_ACCOUNT_ID!;
+    const sponsorPrivateKey = process.env.SPONSOR_PRIVATE_KEY!;
+
+    console.log('\nInitializing ShadeClient...');
+    console.log('Network:', networkId);
+    console.log('Agent contract:', agentContractId);
+    console.log('Sponsor:', sponsorAccountId);
+
+    const agent = await ShadeClient.create({
+      networkId,
+      agentContractId,
+      sponsor: {
+        accountId: sponsorAccountId,
+        privateKey: sponsorPrivateKey,
+      },
+      derivationPath: sponsorPrivateKey, // Deterministic key for local; TEE entropy used in production
+    });
+
+    console.log('Agent account ID:', agent.accountId());
+    setAgent(agent);
+
+    // Fund agent if low balance
+    const balance = await agent.balance();
+    console.log('Agent balance:', balance, 'NEAR');
+    if (balance < 0.2) {
+      console.log('Funding agent...');
+      await agent.fund(0.3);
+      console.log('Agent funded');
+    }
+
+    // Register agent (retry loop like template)
+    console.log('\nRegistering agent...');
     while (true) {
       try {
-        const res = await agentInfo();
-        if (res.checksum) {
-          console.log('Agent registered with checksum:', res.checksum);
-          break;
+        const isWhitelisted = await agent.isWhitelisted();
+        if (isWhitelisted === null || isWhitelisted) {
+          const registered = await agent.register();
+          if (registered) {
+            console.log('Agent registered successfully');
+            break;
+          }
+        } else {
+          console.log('Agent not whitelisted yet. Whitelist account:', agent.accountId());
         }
       } catch (error) {
-        console.error('Error checking agent info:', error);
+        console.error('Registration error:', error);
       }
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise((resolve) => setTimeout(resolve, 10000));
     }
+
+    // Re-register every 6 days
+    const SIX_DAYS_MS = 6 * 24 * 60 * 60 * 1000;
+    setInterval(async () => {
+      try {
+        const registered = await agent.register();
+        if (registered) console.log('Agent re-registered');
+      } catch (error) {
+        console.error('Error re-registering agent:', error);
+      }
+    }, SIX_DAYS_MS);
 
     console.log('\nStarting coordination loop...');
     startCoordinationLoop();

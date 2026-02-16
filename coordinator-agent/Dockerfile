@@ -1,51 +1,28 @@
-# Multi-stage Dockerfile for Coordinator Agent
-# Following verifiable-ai-dao pattern
-
-# Stage 1: Dependencies
-FROM node:22-alpine AS deps
-WORKDIR /app
-
-# Copy package files
-COPY package.json package-lock.json* ./
-
-# Install production dependencies only
-RUN npm ci --only=production
-
-# Stage 2: Build
 FROM node:22-alpine AS builder
+
 WORKDIR /app
 
-# Copy package files and install all dependencies (including dev)
-COPY package.json package-lock.json* tsconfig.json ./
-RUN npm ci --include=dev
+# Copy shared package first
+COPY shared/package.json shared/tsconfig.json ./shared/
+COPY shared/src ./shared/src
+RUN cd shared && npm install && npm run build
 
-# Copy source files
-COPY src/ ./src/
+# Copy coordinator-agent
+COPY coordinator-agent/package.json coordinator-agent/tsconfig.json ./coordinator-agent/
+RUN cd coordinator-agent && npm install
+COPY coordinator-agent/src ./coordinator-agent/src
+RUN cd coordinator-agent && npm run build
 
-# Copy shared library
-COPY ../shared ../shared
+FROM node:22-alpine
 
-# Build TypeScript
-RUN npm run build
-
-# Stage 3: Production Runtime
-FROM node:22-alpine AS runner
 WORKDIR /app
 
-# Copy production dependencies from deps stage
-COPY --from=deps /app/node_modules ./node_modules
+COPY --from=builder /app/shared ./shared
+COPY --from=builder /app/coordinator-agent ./coordinator-agent
 
-# Copy built application from builder stage
-COPY --from=builder /app/dist ./dist
+WORKDIR /app/coordinator-agent
 
-# Copy package.json for runtime
-COPY package.json ./
-
-# Set production environment
-ENV NODE_ENV=production
-
-# Expose port
+ENV PORT=3000
 EXPOSE 3000
 
-# Start the application
-CMD ["npm", "start"]
+CMD ["node", "dist/index.js"]

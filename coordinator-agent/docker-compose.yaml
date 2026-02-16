@@ -1,25 +1,4 @@
-# Docker Compose configuration for Coordinator Agent
-# Following verifiable-ai-dao/docker-compose.yaml pattern
-
 services:
-  # Shade Agent API - handles TEE attestation and registration
-  shade-agent-api:
-    # Fixed image from verifiable-ai-dao
-    image: mattdlockyer/shade-agent-api@sha256:a86e3a4300b069c08d629a38d61a3d780f7992eaf36aa505e4527e466553e2e5
-    container_name: coordinator-shade-agent-api
-    platform: linux/amd64
-    restart: always
-    volumes:
-      - /var/run/tappd.sock:/var/run/tappd.sock
-    environment:
-      NEAR_ACCOUNT_ID: ${NEAR_ACCOUNT_ID}
-      NEAR_SEED_PHRASE: ${NEAR_SEED_PHRASE}
-      API_CODEHASH: ${API_CODEHASH}
-      APP_CODEHASH: ${APP_CODEHASH}
-      NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
-      NEAR_RPC_JSON: ${NEAR_RPC_JSON}
-
-  # Coordinator Agent Application
   coordinator-agent:
     image: ${DOCKER_TAG}
     container_name: coordinator-agent
@@ -28,21 +7,17 @@ services:
     ports:
       - "3000:3000"
     volumes:
-      - /var/run/tappd.sock:/var/run/tappd.sock
+      - /var/run/dstack.sock:/var/run/dstack.sock
     environment:
-      # Coordinator configuration
       PORT: ${PORT}
       POLL_INTERVAL: ${POLL_INTERVAL}
+      NEAR_NETWORK: ${NEAR_NETWORK}
+      # Shade Agent v2 config
+      AGENT_CONTRACT_ID: ${AGENT_CONTRACT_ID}
+      SPONSOR_ACCOUNT_ID: ${SPONSOR_ACCOUNT_ID}
+      SPONSOR_PRIVATE_KEY: ${SPONSOR_PRIVATE_KEY}
       # Ensue configuration
       ENSUE_API_KEY: ${ENSUE_API_KEY}
       ENSUE_TOKEN: ${ENSUE_TOKEN}
-      # NEAR configuration
-      NEAR_ACCOUNT_ID: ${NEAR_ACCOUNT_ID}
-      NEAR_SEED_PHRASE: ${NEAR_SEED_PHRASE}
+      # Contract for view calls (local-contract.ts)
       NEXT_PUBLIC_contractId: ${NEXT_PUBLIC_contractId}
-      NEAR_RPC_JSON: ${NEAR_RPC_JSON}
-      # Shade Agent
-      API_CODEHASH: ${API_CODEHASH}
-      APP_CODEHASH: ${APP_CODEHASH}
-    depends_on:
-      - shade-agent-api

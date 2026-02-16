@@ -7,9 +7,9 @@ import { Buffer } from 'buffer';
 
 const NEAR_NETWORK = process.env.NEAR_NETWORK || 'testnet';
 const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
-  || (NEAR_NETWORK === 'mainnet' ? 'coordinator.delibera.near' : 'ac-proxy.agents-coordinator.testnet');
+  || (NEAR_NETWORK === 'mainnet' ? 'coordinator.agents-coordinator.near' : 'coordinator.agents-coordinator.testnet');
 const SIGNER_ID = process.env.NEAR_ACCOUNT_ID
-  || (NEAR_NETWORK === 'mainnet' ? 'delibera.near' : 'agents-coordinator.testnet');
+  || (NEAR_NETWORK === 'mainnet' ? 'agents-coordinator.near' : 'agents-coordinator.testnet');
 const NEAR_RPC = process.env.NEAR_RPC_JSON
   || (NEAR_NETWORK === 'mainnet' ? 'https://rpc.fastnear.com' : 'https://test.rpc.fastnear.com');
 

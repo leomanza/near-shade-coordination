@@ -11,7 +11,7 @@ import {
 } from "@/lib/api";
 
 const CONTRACT_ID =
-  process.env.NEXT_PUBLIC_contractId || "ac-proxy.agents-coordinator.testnet";
+  process.env.NEXT_PUBLIC_contractId || "coordinator.agents-coordinator.testnet";
 const EXPLORER_URL = `https://testnet.nearblocks.io/address/${CONTRACT_ID}`;
 
 const STATE_COLORS: Record<ProposalState, string> = {
@@ -63,7 +63,7 @@ export default function ContractStatePanel() {
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
       <div className="flex items-center justify-between mb-4">
         <h3 className="text-sm font-semibold text-zinc-100">
-          ShadeBoard
+          Delibera
         </h3>
         <a
           href={EXPLORER_URL}

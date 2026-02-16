@@ -4,9 +4,11 @@ node_modules/
 # Build outputs
 frontend/.next/
 coordinator-contract/target/
+registry-contract/target/
 shared/dist/
 coordinator-agent/node_modules/
 coordinator-agent/dist/
+coordinator-agent/.next
 worker-agent/node_modules/
 worker-agent/dist/
 

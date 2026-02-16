@@ -8,11 +8,15 @@ interface CoordinatorPanelProps {
   online: boolean;
 }
 
-const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId || "ac-proxy.agents-coordinator.testnet";
+const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId || "coordinator.agents-coordinator.testnet";
 
 export default function CoordinatorPanel({ status, online }: CoordinatorPanelProps) {
   const currentStatus = online ? (status?.status || "idle") : "offline";
-  const tally = status?.tally;
+  // Only show tally during active coordination or if completed recently (same session)
+  // Hide stale "completed" tallies when coordinator is idle with no active proposal
+  const isActive = currentStatus !== "idle" && currentStatus !== "offline";
+  const tally = isActive ? status?.tally : null;
+  const proposalId = isActive ? status?.proposalId : null;
   const isVote = tally && typeof tally.approved === "number" && tally.approved + tally.rejected > 0;
 
   return (
@@ -34,10 +38,10 @@ export default function CoordinatorPanel({ status, online }: CoordinatorPanelPro
         {CONTRACT_ID}
       </div>
 
-      {status?.proposalId != null && (
+      {proposalId != null && (
         <div className="text-xs text-zinc-400 mb-2">
           <span className="text-zinc-500">Proposal:</span>{" "}
-          <span className="font-mono text-zinc-300">#{status.proposalId}</span>
+          <span className="font-mono text-zinc-300">#{proposalId}</span>
         </div>
       )}
 

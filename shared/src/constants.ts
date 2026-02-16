@@ -46,6 +46,7 @@ export function getWorkerKeys(workerId: string) {
     RESULT: `coordination/tasks/${workerId}/result`,
     TIMESTAMP: `coordination/tasks/${workerId}/timestamp`,
     ERROR: `coordination/tasks/${workerId}/error`,
+    VERIFICATION_PROOF: `coordination/tasks/${workerId}/verification_proof`,
   };
 }
 
@@ -92,3 +93,19 @@ export function getProposalWorkerKeys(proposalId: string, workerId: string) {
  * Proposal index key — stores a JSON array of all proposal IDs
  */
 export const PROPOSAL_INDEX_KEY = 'coordination/proposals/_index';
+
+/* ─── Agent Registry Keys (persistent, not overwritten per round) ────────── */
+
+/**
+ * Get persistent metadata keys for a worker agent
+ */
+export function getAgentRegistryKeys(agentId: string) {
+  const base = `coordination/agents/${agentId}`;
+  return {
+    ENDPOINT: `${base}/endpoint`,
+    TYPE: `${base}/type`,           // 'coordinator' | 'worker'
+    CVM_ID: `${base}/cvm_id`,
+    DASHBOARD_URL: `${base}/dashboard_url`,
+    UPDATED_AT: `${base}/updated_at`,
+  };
+}

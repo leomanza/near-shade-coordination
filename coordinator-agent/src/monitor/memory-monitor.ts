@@ -250,10 +250,11 @@ async function checkLocalCoordination(): Promise<void> {
  */
 async function checkAndCoordinate(): Promise<void> {
   try {
-    const { agentView } = await import('@neardefi/shade-agent-js');
+    const { getAgent } = await import('../shade-client');
+    const agent = getAgent();
 
     // Poll contract for pending coordinations (like verifiable-ai-dao)
-    const pendingRequests: [number, CoordinationRequest][] = await agentView({
+    const pendingRequests: [number, CoordinationRequest][] = await agent.view({
       methodName: 'get_pending_coordinations',
       args: {},
     });
@@ -333,9 +334,9 @@ async function processCoordination(
       })
       .filter((s): s is { worker_id: string; result_hash: string } => s !== null);
 
-    // Production path: use shade-agent-js for contract call
-    const { agentCall } = await import('@neardefi/shade-agent-js');
-    await agentCall({
+    // Production path: use ShadeClient v2 for contract call
+    const { getAgent } = await import('../shade-client');
+    await getAgent().call({
       methodName: 'record_worker_submissions',
       args: { proposal_id: proposalId, submissions },
     });

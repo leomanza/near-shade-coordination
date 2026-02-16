@@ -1,51 +1,28 @@
-# Multi-stage Dockerfile for Worker Agent 1
-# Following verifiable-ai-dao pattern
+FROM node:20-slim AS builder
 
-# Stage 1: Dependencies
-FROM node:22-alpine AS deps
 WORKDIR /app
 
-# Copy package files
-COPY package.json package-lock.json* ./
+# Copy shared package first
+COPY shared/package.json shared/tsconfig.json ./shared/
+COPY shared/src ./shared/src
+RUN cd shared && npm install && npm run build
 
-# Install production dependencies only
-RUN npm ci --only=production
+# Copy worker-agent
+COPY worker-agent/package.json worker-agent/tsconfig.json ./worker-agent/
+RUN cd worker-agent && npm install
+COPY worker-agent/src ./worker-agent/src
+RUN cd worker-agent && npm run build
 
-# Stage 2: Build
-FROM node:22-alpine AS builder
+FROM node:20-slim
+
 WORKDIR /app
 
-# Copy package files and install all dependencies (including dev)
-COPY package.json package-lock.json* tsconfig.json ./
-RUN npm ci --include=dev
+COPY --from=builder /app/shared ./shared
+COPY --from=builder /app/worker-agent ./worker-agent
 
-# Copy source files
-COPY src/ ./src/
+WORKDIR /app/worker-agent
 
-# Copy shared library
-COPY ../shared ../shared
-
-# Build TypeScript
-RUN npm run build
-
-# Stage 3: Production Runtime
-FROM node:22-alpine AS runner
-WORKDIR /app
-
-# Copy production dependencies from deps stage
-COPY --from=deps /app/node_modules ./node_modules
-
-# Copy built application from builder stage
-COPY --from=builder /app/dist ./dist
-
-# Copy package.json for runtime
-COPY package.json ./
-
-# Set production environment
-ENV NODE_ENV=production
-
-# Expose port
+ENV PORT=3001
 EXPOSE 3001
 
-# Start the application
-CMD ["npm", "start"]
+CMD ["node", "dist/index.js"]

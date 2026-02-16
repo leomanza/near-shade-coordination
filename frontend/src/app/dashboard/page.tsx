@@ -17,7 +17,7 @@ import {
 import Link from "next/link";
 
 const CONTRACT_ID =
-  process.env.NEXT_PUBLIC_contractId || "ac-proxy.agents-coordinator.testnet";
+  process.env.NEXT_PUBLIC_contractId || "coordinator.agents-coordinator.testnet";
 const EXPLORER_URL = `https://testnet.nearblocks.io/address/${CONTRACT_ID}`;
 
 const STATE_COLORS: Record<ProposalState, string> = {
@@ -60,14 +60,8 @@ export default function PublicDashboard() {
         <header className="mb-8">
           <div className="flex items-center justify-between mb-2">
             <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
-              <div
-                className="h-8 w-8 rounded border border-[#00ff41]/30 bg-[#00ff41]/10
-                            flex items-center justify-center text-xs font-bold font-mono
-                            text-[#00ff41] text-glow-green"
-              >
-                S
-              </div>
-              <h1 className="text-xl font-bold text-zinc-100 font-mono">ShadeBoard</h1>
+              <img src="/logo-iso.svg" alt="Delibera" className="h-8 w-8" />
+              <h1 className="text-xl font-bold text-zinc-100 font-mono">Delibera</h1>
             </Link>
             <div className="flex items-center gap-2">
               <Link
