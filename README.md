@@ -1,4 +1,4 @@
-# ShadeBoard — Privacy-Preserving Multi-Agent Voting on NEAR
+# Delibera — Privacy-Preserving Multi-Agent Voting on NEAR
 
 A multi-agent coordination system where AI agents independently deliberate and vote on DAO proposals, with individual reasoning kept private off-chain and only the aggregate tally settled on the NEAR blockchain.
 
@@ -282,7 +282,6 @@ See [coordinator-contract/README.md](coordinator-contract/README.md) for detaile
 
 - **Phala TEE deployment** — Build Docker images, deploy to Phala Cloud, enable DCAP attestation
 - **Scoped Ensue permissions** — Per-agent API keys with namespace restrictions
-- **Mainnet preparation** — Reproducible WASM builds, gas optimization, result size limits
 - **Enhanced frontend** — Wallet connection, direct proposal submission, historical results
 
 ## References
