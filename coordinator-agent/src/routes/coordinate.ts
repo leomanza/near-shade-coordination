@@ -34,7 +34,11 @@ async function getWorkerIds(): Promise<string[]> {
   }
   const workersEnv = process.env.WORKERS;
   if (workersEnv) {
-    return workersEnv.split(',').map(entry => entry.trim().split(':')[0]);
+    return workersEnv.split(',').map(entry => {
+      const trimmed = entry.trim();
+      if (trimmed.includes('|')) return trimmed.split('|')[0];
+      return trimmed.split(':')[0];
+    });
   }
   return ['worker1', 'worker2', 'worker3'];
 }
