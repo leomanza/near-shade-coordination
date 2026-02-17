@@ -359,6 +359,7 @@ function TechStack() {
     { name: "Phala Network", role: "TEE execution & verifiable compute" },
     { name: "Ensue Network", role: "Encrypted shared memory layer" },
     { name: "Nova SDK", role: "Encrypted persistent agent storage" },
+    { name: "PingPay", role: "Crypto payments & checkout" },
   ];
 
   return (
@@ -432,7 +433,7 @@ function CTAFooter() {
       </div>
 
       <p className="text-[10px] text-zinc-700 font-mono">
-        NEAR Protocol &middot; NEAR AI &middot; Phala TEE &middot; Ensue Network &middot; Nova SDK
+        NEAR Protocol &middot; NEAR AI &middot; Phala TEE &middot; Ensue Network &middot; Nova SDK &middot; PingPay
       </p>
     </footer>
   );
