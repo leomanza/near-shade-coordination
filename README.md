@@ -2,7 +2,7 @@
 
 A decentralized platform where independent AI agents deliberate and vote on DAO proposals. Individual reasoning stays private off-chain in Ensue shared memory, while only aggregate tallies are settled on the NEAR blockchain. Anyone can deploy their own coordinator or worker agents through the platform -- each running autonomously inside Phala TEE containers.
 
-Built with [NEAR Shade Agents](https://docs.near.org/ai/shade-agents/getting-started/introduction), [NEAR AI](https://near.ai/), [Ensue Memory Network](https://ensue.dev), [Phala TEE](https://phala.network/), and [PingPay](https://pingpay.io/).
+Built with [NEAR Shade Agents](https://docs.near.org/ai/shade-agents/getting-started/introduction), [NEAR AI](https://near.ai/), [Ensue Memory Network](https://ensue.dev), [Nova](https://nova-sdk.com), [Phala TEE](https://phala.network/), and [PingPay](https://pingpay.io/).
 
 ## How It Works
 
@@ -54,7 +54,19 @@ Individual AI reasoning and votes never touch the blockchain -- they stay privat
         ┌─────┴──┐ ┌─────┴──┐ ┌─────┴──┐
         │Voter 1 │ │Voter 2 │ │Voter N │──── Phala TEE (production)
         │(:3001) │ │(:3002) │ │(:300N) │
-        └────────┘ └────────┘ └────────┘
+        └───┬────┘ └───┬────┘ └───┬────┘
+            │          │          │
+       read/│write     │          │
+            └──────────┴──────────┘
+           ┌──────────────────────────────┐
+           │   Nova (Encrypted Storage)   │
+           │   (long-term agent identity) │
+           │   - Manifesto & values       │
+           │   - Voting preferences       │
+           │   - Decision history         │
+           │   - AES-256-GCM encrypted    │
+           │   - IPFS-backed via TEE      │
+           └──────────────────────────────┘
 
            ┌─────────────────────────────┐
            │  Protocol API (:3005)       │
@@ -88,6 +100,9 @@ Individual AI reasoning and votes never touch the blockchain -- they stay privat
 | Agent identity & knowledge | Ensue shared memory | Private |
 | NEAR AI verification proofs | Ensue shared memory | Private |
 | Processing metadata | Ensue shared memory | Private |
+| Agent manifesto & values | Nova (encrypted IPFS) | Private (per-worker) |
+| Voting preferences & weights | Nova (encrypted IPFS) | Private (per-worker) |
+| Decision history | Nova (encrypted IPFS) | Private (per-worker) |
 
 ## Project Structure
 
@@ -105,7 +120,9 @@ near-shade-coordination/
 ├── worker-agent/                # AI voter agent template (TypeScript + Hono)
 │   └── src/
 │       ├── workers/ai-voter.ts  # NEAR AI integration (DeepSeek-V3.1 + verification)
-│       └── workers/task-handler.ts  # Task execution, Ensue status tracking
+│       ├── workers/task-handler.ts  # Task execution, Ensue status tracking
+│       ├── nova/nova-client.ts     # Nova SDK client (encrypted IPFS uploads/retrieval)
+│       └── nova/agent-identity.ts  # Persistent identity (manifesto, preferences, history)
 ├── protocol-api/                # Central platform API (TypeScript + Hono)
 │   └── src/
 │       ├── routes/deploy.ts     # Phala CVM deploy + registry contract updates
@@ -355,6 +372,36 @@ coordination/
 | Coordinator | write | `coordination/coordinator/*` |
 | Frontend | read | `coordination/*` (display only) |
 
+## Nova -- Persistent Agent Identity
+
+[Nova](https://nova-sdk.com) is the long-term encrypted storage layer for worker agent identities. While Ensue handles real-time coordination (task status, vote results, tallies), Nova handles persistent memory that survives across sessions and proposals.
+
+### What Nova Stores
+
+Each worker agent has its own private Nova group (cryptographically isolated via AES-256-GCM keys managed inside the TEE):
+
+- **Agent manifesto** -- Name, role, core values, and decision guidelines that define the agent's personality
+- **Voting preferences** -- Weighted factors (community benefit, technical feasibility, sustainability, etc.) that influence how the agent evaluates proposals
+- **Knowledge notes** -- Accumulated knowledge fed to the agent over time by its owner
+- **Decision history** -- Record of past votes and reasoning, giving the agent memory of its own decisions
+
+### How It Works
+
+1. On startup, each worker initializes its Nova group and loads (or seeds) its identity
+2. Before each vote, the worker loads its full identity context from Nova -- manifesto, preferences, and recent decisions
+3. This context is passed to the AI model alongside the proposal and DAO manifesto
+4. After voting, the decision is recorded back to Nova for future reference
+5. Owners can update an agent's manifesto, values, and voting weights via the `/api/knowledge/*` endpoints
+
+### Why Two Memory Layers
+
+| Layer | Purpose | Scope | Encryption |
+|-------|---------|-------|------------|
+| Ensue | Real-time coordination (task dispatch, vote collection, tallies) | Shared across coordinator + workers | Permissioned access |
+| Nova | Long-term agent identity (manifesto, preferences, history) | Per-worker private groups | AES-256-GCM via TEE |
+
+Nova always runs on NEAR mainnet regardless of which network the smart contracts are on. The `nova_group_id` for each worker is tracked in the on-chain registry contract.
+
 ## Production Vision
 
 When fully deployed, Delibera operates as a permissionless platform:
@@ -381,6 +428,7 @@ When fully deployed, Delibera operates as a permissionless platform:
 | AI Verification | NEAR AI Signature + Attestation API | Cryptographic proof of model identity |
 | Agents | TypeScript + Hono 4.8 | HTTP servers for coordination |
 | Shared Memory | Ensue Memory Network | Off-chain agent coordination |
+| Agent Identity | Nova SDK (encrypted IPFS via TEE) | Persistent long-term agent memory |
 | TEE Runtime | Phala Network + Shade Agent SDK v2 | Trusted execution environment |
 | Payments | PingPay (USDC on NEAR) | Agent deployment checkout |
 | Frontend | Next.js 15 + React 19 | Dashboard, deploy UI, on-chain viewer |
@@ -422,6 +470,9 @@ WORKER_ID=worker1                  # worker2, worker3
 PORT=3001                          # 3002, 3003
 ENSUE_API_KEY=your-ensue-api-key
 NEAR_AI_API_KEY=your-near-ai-key   # or NEAR_API_KEY
+NOVA_ACCOUNT_ID=your-nova-account  # Nova mainnet account
+NOVA_API_KEY=your-nova-api-key
+NOVA_GROUP_ID=your-nova-group-id   # Per-worker private group
 NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
 ```
 
@@ -547,6 +598,7 @@ near contract deploy registry.agents-coordinator.testnet \
 - [NEAR AI API](https://cloud-api.near.ai)
 - [NEAR AI Verification (Signature + Attestation)](https://docs.near.ai/cloud/verification/chat)
 - [Ensue Memory Network](https://ensue.dev)
+- [Nova SDK (Encrypted Agent Storage)](https://nova-sdk.com)
 - [Phala Network TEE / Cloud](https://phala.network/)
 - [PingPay Payments](https://pingpay.io/)
 - [AI DAO Tutorial](https://docs.near.org/ai/shade-agents/tutorials/ai-dao/overview)
