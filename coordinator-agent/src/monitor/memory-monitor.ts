@@ -42,14 +42,23 @@ interface WorkerConfig {
 
 /**
  * Get the list of configured workers from environment.
- * Format: WORKERS=worker1:3001,worker2:3002,worker3:3003
+ * Supports two formats:
+ *   WORKERS=worker1:3001,worker2:3002          (localhost ports)
+ *   WORKERS=worker1|https://url1,worker2|https://url2  (full URLs)
  * Falls back to the default 3 workers.
  */
 function getWorkerConfigs(): WorkerConfig[] {
   const workersEnv = process.env.WORKERS;
   if (workersEnv) {
     return workersEnv.split(',').map(entry => {
-      const [id, port] = entry.trim().split(':');
+      const trimmed = entry.trim();
+      // Pipe delimiter = full URL format
+      if (trimmed.includes('|')) {
+        const [id, ...urlParts] = trimmed.split('|');
+        return { id, url: urlParts.join('|') };
+      }
+      // Colon delimiter = localhost port format
+      const [id, port] = trimmed.split(':');
       return { id, url: `http://localhost:${port}` };
     });
   }
