@@ -7,7 +7,6 @@ export default function AgentEndpointConfig({ agentId }: { agentId: string }) {
   const [endpoint, setEndpoint] = useState("");
   const [currentEndpoint, setCurrentEndpoint] = useState<string | null>(null);
   const [cvmId, setCvmId] = useState<string | null>(null);
-  const [dashboardUrl, setDashboardUrl] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
@@ -18,7 +17,6 @@ export default function AgentEndpointConfig({ agentId }: { agentId: string }) {
         setCurrentEndpoint(info.endpoint);
         if (info.endpoint) setEndpoint(info.endpoint);
         setCvmId(info.cvmId);
-        setDashboardUrl(info.dashboardUrl);
       }
     });
   }, [agentId]);
@@ -53,14 +51,6 @@ export default function AgentEndpointConfig({ agentId }: { agentId: string }) {
       {cvmId && (
         <div className="text-[10px] text-zinc-600 font-mono mb-1">
           CVM: {cvmId}
-          {dashboardUrl && (
-            <>
-              {" — "}
-              <a href={dashboardUrl} target="_blank" rel="noopener noreferrer" className="text-zinc-500 underline hover:text-zinc-400">
-                dashboard
-              </a>
-            </>
-          )}
         </div>
       )}
 

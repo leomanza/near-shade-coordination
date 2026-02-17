@@ -1,32 +1,9 @@
 import { Hono } from 'hono';
 import { deployCvm, getCvmStatus } from '../phala/phala-client';
-import { createEnsueClient, getAgentRegistryKeys } from '@near-shade-coordination/shared';
 import { execSync } from 'child_process';
 import { Buffer } from 'buffer';
 import * as fs from 'fs';
 import * as path from 'path';
-
-let _ensueClient: ReturnType<typeof createEnsueClient> | null = null;
-function getEnsueClient() {
-  if (!_ensueClient) _ensueClient = createEnsueClient();
-  return _ensueClient;
-}
-
-/** Save agent endpoint metadata to Ensue */
-async function saveAgentEndpoint(agentId: string, data: { endpoint?: string; type: string; cvmId?: string; dashboardUrl?: string }) {
-  const keys = getAgentRegistryKeys(agentId);
-  const ensue = getEnsueClient();
-  try {
-    if (data.endpoint) await ensue.updateMemory(keys.ENDPOINT, data.endpoint);
-    await ensue.updateMemory(keys.TYPE, data.type);
-    if (data.cvmId) await ensue.updateMemory(keys.CVM_ID, data.cvmId);
-    if (data.dashboardUrl) await ensue.updateMemory(keys.DASHBOARD_URL, data.dashboardUrl);
-    await ensue.updateMemory(keys.UPDATED_AT, new Date().toISOString());
-    console.log(`[deploy] Saved agent endpoint for ${agentId}: ${data.endpoint || 'no endpoint yet'}`);
-  } catch (e) {
-    console.warn(`[deploy] Failed to save agent endpoint (non-fatal):`, e);
-  }
-}
 
 const deploy = new Hono();
 
@@ -45,7 +22,11 @@ const SIGNER_ID = process.env.NEAR_ACCOUNT_ID
   || (NEAR_NETWORK === 'mainnet' ? 'agents-coordinator.near' : 'agents-coordinator.testnet');
 const NEAR_CLI = process.env.NEAR_CLI_PATH || `${process.env.HOME}/.cargo/bin/near`;
 
-async function registerInRegistry(type: 'coordinator' | 'worker', name: string, coordinatorId?: string): Promise<void> {
+/**
+ * Register in the registry contract. Returns the generated worker_id for workers
+ * (format: "{name}-{seq}") or the coordinator name.
+ */
+async function registerInRegistry(type: 'coordinator' | 'worker', name: string, coordinatorId?: string): Promise<string | null> {
   const methodName = type === 'coordinator' ? 'register_coordinator' : 'register_worker';
   const args = type === 'coordinator'
     ? { name }
@@ -64,18 +45,61 @@ async function registerInRegistry(type: 'coordinator' | 'worker', name: string, 
       env: { ...process.env, PATH: `${process.env.HOME}/.cargo/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH}` },
     });
     console.log(`[deploy] Registry ${methodName} succeeded:`, result.substring(0, 300));
+
+    // Try to extract the worker_id from the JSON return value
+    if (type === 'worker') {
+      const match = result.match(/"worker_id"\s*:\s*"([^"]+)"/);
+      if (match) return match[1];
+    }
+    return name;
   } catch (error: any) {
     const msg = error.stderr || error.message || '';
     if (msg.includes('already taken') || msg.includes('already exists')) {
       console.log(`[deploy] ${type} "${name}" already registered in registry, skipping`);
-      return;
+      return type === 'coordinator' ? name : null;
     }
     console.warn(`[deploy] Registry ${methodName} failed (non-fatal):`, msg.substring(0, 300));
+    return type === 'coordinator' ? name : null;
   }
 }
 
 const COORDINATOR_CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
   || (NEAR_NETWORK === 'mainnet' ? 'coordinator.agents-coordinator.near' : 'coordinator.agents-coordinator.testnet');
+
+/**
+ * Update endpoint_url (and optionally phala_cvm_id) on the registry contract
+ * after a successful Phala deploy.
+ */
+async function updateRegistryEndpoint(
+  type: 'coordinator' | 'worker',
+  name: string,
+  opts: { endpointUrl?: string; cvmId?: string },
+): Promise<void> {
+  const methodName = type === 'coordinator' ? 'update_coordinator' : 'update_worker';
+  const idKey = type === 'coordinator' ? 'name' : 'worker_id';
+
+  const args: Record<string, unknown> = { [idKey]: name };
+  if (opts.endpointUrl) args.endpoint_url = opts.endpointUrl;
+  if (opts.cvmId) args.phala_cvm_id = opts.cvmId;
+
+  const argsB64 = Buffer.from(JSON.stringify(args)).toString('base64');
+
+  const cmd = `${NEAR_CLI} contract call-function as-transaction ${REGISTRY_CONTRACT_ID} ${methodName} base64-args '${argsB64}' prepaid-gas '30 Tgas' attached-deposit '0 NEAR' sign-as ${SIGNER_ID} network-config ${NEAR_NETWORK} sign-with-keychain send`;
+
+  console.log(`[deploy] Updating registry endpoint for ${type} "${name}"...`);
+  try {
+    const result = execSync(cmd, {
+      encoding: 'utf-8',
+      timeout: 30000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: { ...process.env, PATH: `${process.env.HOME}/.cargo/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH}` },
+    });
+    console.log(`[deploy] Registry ${methodName} endpoint update succeeded:`, result.substring(0, 300));
+  } catch (error: any) {
+    const msg = error.stderr || error.message || '';
+    console.warn(`[deploy] Registry ${methodName} endpoint update failed (non-fatal):`, msg.substring(0, 300));
+  }
+}
 
 async function registerWorkerInCoordinatorContract(workerId: string, accountId?: string): Promise<void> {
   const args = { worker_id: workerId, account_id: accountId || null };
@@ -146,7 +170,7 @@ deploy.post('/', async (c) => {
 });
 
 async function deployCoordinator(c: any, body: DeployRequest) {
-  await registerInRegistry('coordinator', body.name);
+  const registryId = await registerInRegistry('coordinator', body.name);
 
   if (!body.phalaApiKey) {
     console.log(`[deploy] Coordinator "${body.name}" registered on-chain + locally (no Phala key)`);
@@ -182,11 +206,9 @@ async function deployCoordinator(c: any, body: DeployRequest) {
 
   console.log(`[deploy] Coordinator "${body.name}" deployed: CVM ${result.cvmId}, dashboard: ${result.dashboardUrl}, endpoint: ${result.endpointUrl}`);
 
-  await saveAgentEndpoint(body.name, {
-    type: 'coordinator',
-    endpoint: result.endpointUrl,
+  await updateRegistryEndpoint('coordinator', body.name, {
+    endpointUrl: result.endpointUrl,
     cvmId: result.cvmId,
-    dashboardUrl: result.dashboardUrl,
   });
 
   return c.json({
@@ -203,7 +225,7 @@ async function deployCoordinator(c: any, body: DeployRequest) {
 async function deployWorker(c: any, body: DeployRequest) {
   const novaGroupId = body.novaGroupId || `delibera-worker-${body.name}-${Date.now()}`;
 
-  await registerInRegistry('worker', body.name, body.coordinatorId);
+  const registryWorkerId = await registerInRegistry('worker', body.name, body.coordinatorId);
 
   if (body.coordinatorId) {
     await registerWorkerInCoordinatorContract(body.name);
@@ -240,12 +262,12 @@ async function deployWorker(c: any, body: DeployRequest) {
 
   console.log(`[deploy] Worker "${body.name}" deployed: CVM ${result.cvmId}, dashboard: ${result.dashboardUrl}, endpoint: ${result.endpointUrl}`);
 
-  await saveAgentEndpoint(body.name, {
-    type: 'worker',
-    endpoint: result.endpointUrl,
-    cvmId: result.cvmId,
-    dashboardUrl: result.dashboardUrl,
-  });
+  if (registryWorkerId) {
+    await updateRegistryEndpoint('worker', registryWorkerId, {
+      endpointUrl: result.endpointUrl,
+      cvmId: result.cvmId,
+    });
+  }
 
   return c.json({
     success: true,

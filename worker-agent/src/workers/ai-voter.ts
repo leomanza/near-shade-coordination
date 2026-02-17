@@ -176,7 +176,7 @@ async function fetchModelAttestation(
   model: string,
   apiKey: string,
 ): Promise<ModelAttestation> {
-  const nonce = randomBytes(16).toString('hex');
+  const nonce = randomBytes(32).toString('hex');
   const url = `https://cloud-api.near.ai/v1/attestation/report?model=${encodeURIComponent(model)}&signing_algo=ecdsa&nonce=${nonce}`;
 
   const res = await fetch(url, {

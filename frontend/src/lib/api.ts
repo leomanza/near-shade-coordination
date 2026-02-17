@@ -7,14 +7,14 @@ let _coordinatorUrl = process.env.NEXT_PUBLIC_COORDINATOR_URL || "http://localho
 export function setActiveCoordinatorUrl(url: string) { _coordinatorUrl = url; }
 function getCoordinatorUrl(): string { return _coordinatorUrl; }
 
-/** In-memory cache of agent endpoints (fetched from Ensue via protocol API) */
+/** In-memory cache of agent endpoints (fetched from registry contract via protocol API) */
 let _agentEndpointsCache: Record<string, string> = {};
 let _agentEndpointsFetchedAt = 0;
 const CACHE_TTL = 30_000; // 30s
 
-/** Fetch all agent endpoints from protocol API (Ensue-backed) */
-export async function fetchAgentEndpoints(): Promise<Record<string, { endpoint: string | null; cvmId: string | null; dashboardUrl: string | null }>> {
-  const res = await safeFetch<{ agents: Record<string, { endpoint: string | null; cvmId: string | null; dashboardUrl: string | null }> }>(
+/** Fetch all agent endpoints from protocol API (registry contract-backed) */
+export async function fetchAgentEndpoints(): Promise<Record<string, { endpoint: string | null; type: string; cvmId: string | null }>> {
+  const res = await safeFetch<{ agents: Record<string, { endpoint: string | null; type: string; cvmId: string | null }> }>(
     `${API_URL}/api/agents/endpoints`
   );
   if (res?.agents) {
@@ -28,7 +28,7 @@ export async function fetchAgentEndpoints(): Promise<Record<string, { endpoint: 
   return {};
 }
 
-/** Update a specific agent's endpoint URL (persisted to Ensue via protocol API) */
+/** Update a specific agent's endpoint URL (persisted on-chain via protocol API) */
 export async function updateAgentEndpoint(agentId: string, endpoint: string, cvmId?: string, dashboardUrl?: string): Promise<boolean> {
   const res = await safeFetch<{ success: boolean }>(
     `${API_URL}/api/agents/${agentId}/endpoint`,
@@ -41,7 +41,7 @@ export async function updateAgentEndpoint(agentId: string, endpoint: string, cvm
   return !!res?.success;
 }
 
-/** Dynamic worker URLs - checks Ensue-backed endpoints, falls back to localhost */
+/** Dynamic worker URLs - checks registry-backed endpoints, falls back to localhost */
 function getWorkerUrl(workerId: string): string {
   if (_agentEndpointsCache[workerId]) return _agentEndpointsCache[workerId];
   const envKey = `NEXT_PUBLIC_${workerId.toUpperCase()}_URL`;
@@ -391,6 +391,7 @@ export interface RegistryCoordinator {
   contract_id: string | null;
   phala_cvm_id: string | null;
   ensue_configured: boolean;
+  endpoint_url: string | null;
   created_at: number;
   active: boolean;
 }
@@ -401,6 +402,7 @@ export interface RegistryWorker {
   coordinator_id: string | null;
   phala_cvm_id: string | null;
   nova_group_id: string | null;
+  endpoint_url: string | null;
   created_at: number;
   active: boolean;
 }

@@ -1,10 +1,15 @@
 /**
  * Phala Cloud deployment using @phala/cloud SDK.
  * Handles env encryption for TEE + proper CVM provisioning.
+ *
+ * Endpoint discovery pattern from shade-agent-cli:
+ *   1. Poll GET /api/v1/cvms/{id} for `public_urls[].app`
+ *   2. Ping the endpoint until health check returns "running"
  */
 import { createClient, encryptEnvVars } from '@phala/cloud';
 
 const CLOUD_URL = 'https://cloud.phala.com';
+const PHALA_API = 'https://cloud-api.phala.network/api/v1';
 
 export interface DeployCvmResult {
   cvmId: string;
@@ -19,6 +24,8 @@ export interface DeployCvmResult {
  * 1. Provision CVM (validates compose, selects resources)
  * 2. Encrypt env vars with TEE public key
  * 3. Commit provision (creates the CVM)
+ * 4. Poll for public endpoint URL
+ * 5. Wait for app to be ready (health check)
  */
 export async function deployCvm(
   apiKey: string,
@@ -63,30 +70,19 @@ export async function deployCvm(
   const vmUuid = (result as any).vm_uuid ?? String((result as any).id);
   console.log(`[phala] CVM created: ${vmUuid}`);
 
-  // Try to get the public endpoint URL by polling CVM status
-  let endpointUrl: string | undefined;
-  try {
-    // Wait a bit for the CVM to get assigned, then query
-    await new Promise(r => setTimeout(r, 3000));
-    const cvmInfo = await getCvmStatus(apiKey, vmUuid);
-    if (cvmInfo?.hosted_url) {
-      endpointUrl = cvmInfo.hosted_url;
-    } else if (cvmInfo?.dstack_dashboard_url) {
-      // Derive endpoint from dashboard URL pattern: replace -8090 with -PORT
-      const dashUrl = cvmInfo.dstack_dashboard_url as string;
-      const match = dashUrl.match(/^(https:\/\/[a-f0-9]+)-8090\./);
-      if (match) {
-        endpointUrl = dashUrl.replace('-8090.', '-3001.');
-      }
-    }
-    console.log(`[phala] Endpoint URL: ${endpointUrl || 'not yet available'}`);
-  } catch (e) {
-    console.log(`[phala] Could not fetch endpoint URL yet (CVM still provisioning)`);
+  // Step 4: Poll for public endpoint URL (shade-agent-cli pattern)
+  const endpointUrl = await getAppUrl(apiKey, vmUuid);
+  console.log(`[phala] Endpoint URL: ${endpointUrl || 'not yet available'}`);
+
+  // Step 5: Wait for app to actually respond (if we got a URL)
+  if (endpointUrl) {
+    const ready = await waitForAppReady(endpointUrl);
+    console.log(`[phala] App ready: ${ready}`);
   }
 
   return {
     cvmId: vmUuid,
-    status: 'deploying',
+    status: endpointUrl ? 'running' : 'deploying',
     dashboardUrl: `${CLOUD_URL}/dashboard/cvms/${vmUuid}`,
     appId: provision.app_id ?? '',
     endpointUrl,
@@ -94,16 +90,103 @@ export async function deployCvm(
 }
 
 /**
- * Get CVM status
+ * Get public endpoint URLs from a CVM.
+ * Polls GET /api/v1/cvms/{id} for `public_urls[].app`
+ * Pattern from: shade-agent-cli/src/commands/deploy/phala.js
+ */
+async function getAppUrl(
+  apiKey: string,
+  cvmId: string,
+  maxAttempts = 10,
+  delay = 3000,
+): Promise<string | undefined> {
+  console.log(`[phala] Polling for public endpoint...`);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(`${PHALA_API}/cvms/${cvmId}`, {
+        headers: { 'X-API-Key': apiKey },
+      });
+      if (!res.ok) {
+        console.log(`[phala] Attempt ${attempt}/${maxAttempts}: HTTP ${res.status}`);
+        if (attempt < maxAttempts) {
+          await new Promise(r => setTimeout(r, delay));
+        }
+        continue;
+      }
+      const data = await res.json() as any;
+      if (!data.error && Array.isArray(data.public_urls)) {
+        const validUrls = data.public_urls.filter(
+          (u: any) => u.app && u.app.trim() !== '',
+        );
+        if (validUrls.length > 0) {
+          console.log(`[phala] Found ${validUrls.length} public URL(s):`);
+          validUrls.forEach((u: any, i: number) => {
+            console.log(`  ${i + 1}. ${u.app}${u.instance ? ` (instance: ${u.instance})` : ''}`);
+          });
+          return validUrls[0].app;
+        }
+      }
+    } catch (e) {
+      console.log(`[phala] Attempt ${attempt}/${maxAttempts}: ${e instanceof Error ? e.message : 'error'}`);
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+
+  console.log(`[phala] Public URL not available after ${maxAttempts} attempts`);
+  return undefined;
+}
+
+/**
+ * Ping an endpoint until it responds with a health check.
+ * Pattern from: shade-agent-framework/tests-in-tee/test-script.js
+ */
+async function waitForAppReady(
+  baseUrl: string,
+  maxAttempts = 20,
+  delay = 10000,
+): Promise<boolean> {
+  console.log(`[phala] Waiting for app to be ready at ${baseUrl}...`);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const res = await fetch(baseUrl, {
+        method: 'GET',
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        const data = await res.json() as any;
+        if (data.message && String(data.message).toLowerCase().includes('running')) {
+          console.log(`[phala] App is ready (attempt ${attempt})`);
+          return true;
+        }
+      }
+    } catch {
+      // Continue retrying
+    }
+
+    if (attempt < maxAttempts) {
+      console.log(`[phala] Not ready yet (attempt ${attempt}/${maxAttempts}), retrying in ${delay / 1000}s...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+
+  console.log(`[phala] App did not become ready after ${maxAttempts * delay / 1000}s`);
+  return false;
+}
+
+/**
+ * Get CVM status (raw API response)
  */
 export async function getCvmStatus(
   apiKey: string,
   cvmId: string,
 ): Promise<any> {
-  const client = createClient({ apiKey });
-  // Use raw fetch since getCvm may not exist on all SDK versions
-  const res = await fetch(`https://cloud-api.phala.network/api/v1/cvms/${cvmId}`, {
-    headers: { 'Authorization': `Bearer ${apiKey}` },
+  const res = await fetch(`${PHALA_API}/cvms/${cvmId}`, {
+    headers: { 'X-API-Key': apiKey },
   });
   return res.json();
 }

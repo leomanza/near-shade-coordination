@@ -9,8 +9,10 @@ const DEFAULT_MIN_DEPOSIT: NearToken = NearToken::from_millinear(100); // 0.1 NE
 #[derive(BorshStorageKey)]
 #[near]
 pub enum StorageKey {
-    Coordinators,
-    Workers,
+    _DeprecatedCoordinators, // ordinal 0 — old format (no endpoint_url)
+    _DeprecatedWorkers,      // ordinal 1 — old format
+    CoordinatorsV2,          // ordinal 2 — with endpoint_url
+    WorkersV2,               // ordinal 3 — same schema, fresh prefix
 }
 
 /// A registered coordinator on the ShadeBoard platform
@@ -22,6 +24,7 @@ pub struct CoordinatorEntry {
     pub contract_id: Option<AccountId>,
     pub phala_cvm_id: Option<String>,
     pub ensue_configured: bool,
+    pub endpoint_url: Option<String>,
     pub created_at: u64,
     pub active: bool,
 }
@@ -35,6 +38,7 @@ pub struct WorkerEntry {
     pub coordinator_id: Option<String>,
     pub phala_cvm_id: Option<String>,
     pub nova_group_id: Option<String>,
+    pub endpoint_url: Option<String>,
     pub created_at: u64,
     pub active: bool,
 }
@@ -56,21 +60,22 @@ impl RegistryContract {
     pub fn new(admin: AccountId) -> Self {
         Self {
             admin,
-            coordinators: IterableMap::new(StorageKey::Coordinators),
-            workers: IterableMap::new(StorageKey::Workers),
+            coordinators: IterableMap::new(StorageKey::CoordinatorsV2),
+            workers: IterableMap::new(StorageKey::WorkersV2),
             next_worker_id: 0,
             min_deposit: DEFAULT_MIN_DEPOSIT,
         }
     }
 
-    /// Migrate from old state (no min_deposit field) to new state
+    /// Migrate to V2 storage (adds endpoint_url to CoordinatorEntry).
+    /// Old data at ordinals 0/1 is abandoned; fresh maps at ordinals 2/3.
     #[init(ignore_state)]
     #[private]
     pub fn migrate(admin: AccountId) -> Self {
         Self {
             admin,
-            coordinators: IterableMap::new(StorageKey::Coordinators),
-            workers: IterableMap::new(StorageKey::Workers),
+            coordinators: IterableMap::new(StorageKey::CoordinatorsV2),
+            workers: IterableMap::new(StorageKey::WorkersV2),
             next_worker_id: 0,
             min_deposit: DEFAULT_MIN_DEPOSIT,
         }
@@ -116,6 +121,7 @@ impl RegistryContract {
             contract_id: None,
             phala_cvm_id: None,
             ensue_configured: false,
+            endpoint_url: None,
             created_at: env::block_timestamp(),
             active: true,
         };
@@ -125,13 +131,14 @@ impl RegistryContract {
         entry
     }
 
-    /// Update coordinator deployment info (only owner)
+    /// Update coordinator deployment info (only owner or admin)
     pub fn update_coordinator(
         &mut self,
         name: String,
         contract_id: Option<AccountId>,
         phala_cvm_id: Option<String>,
         ensue_configured: Option<bool>,
+        endpoint_url: Option<String>,
     ) {
         let entry = self.coordinators.get_mut(&name).expect("Coordinator not found");
         require!(
@@ -147,6 +154,9 @@ impl RegistryContract {
         }
         if let Some(ec) = ensue_configured {
             entry.ensue_configured = ec;
+        }
+        if let Some(url) = endpoint_url {
+            entry.endpoint_url = Some(url);
         }
     }
 
@@ -200,6 +210,7 @@ impl RegistryContract {
             coordinator_id,
             phala_cvm_id: None,
             nova_group_id: None,
+            endpoint_url: None,
             created_at: env::block_timestamp(),
             active: true,
         };
@@ -216,6 +227,7 @@ impl RegistryContract {
         phala_cvm_id: Option<String>,
         nova_group_id: Option<String>,
         coordinator_id: Option<String>,
+        endpoint_url: Option<String>,
     ) {
         let entry = self.workers.get_mut(&worker_id).expect("Worker not found");
         require!(
@@ -231,6 +243,9 @@ impl RegistryContract {
         }
         if let Some(cid) = coordinator_id {
             entry.coordinator_id = Some(cid);
+        }
+        if let Some(url) = endpoint_url {
+            entry.endpoint_url = Some(url);
         }
     }
 
