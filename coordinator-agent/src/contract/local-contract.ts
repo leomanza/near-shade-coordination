@@ -108,12 +108,16 @@ export async function localStartCoordination(taskConfig: string): Promise<number
   const beforeId = await localViewCall<number>('get_current_proposal_id', {}) ?? 0;
 
   try {
-    await contractCall('start_coordination', { task_config: taskConfig });
+    // start_coordination uses yield/resume — the tx creates the proposal immediately
+    // but then waits ~200 blocks for coordinator_resume to call back. We DON'T want
+    // to wait for that; just fire the tx and race with a short timeout.
+    await Promise.race([
+      contractCall('start_coordination', { task_config: taskConfig }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout (expected for yield/resume)')), 15000)),
+    ]);
   } catch (error: any) {
-    // start_coordination uses yield/resume — the tx may time out waiting for
-    // the yield callback, but the proposal creation itself succeeds.
     const msg = error.message || '';
-    if (msg.includes('timeout') || msg.includes('ETIMEDOUT') || msg.includes('Timeout')) {
+    if (msg.includes('timeout') || msg.includes('ETIMEDOUT') || msg.includes('Timeout') || msg.includes('yield')) {
       console.warn('[CONTRACT] start_coordination timed out (expected for yield/resume), checking if tx succeeded...');
     } else {
       console.error('[CONTRACT] start_coordination failed:', msg.substring(0, 300));
@@ -122,7 +126,7 @@ export async function localStartCoordination(taskConfig: string): Promise<number
   }
 
   // Wait for finalization
-  await new Promise(r => setTimeout(r, 3000));
+  await new Promise(r => setTimeout(r, 5000));
 
   // Check if proposal ID incremented
   const afterId = await localViewCall<number>('get_current_proposal_id', {}) ?? 0;
