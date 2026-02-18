@@ -1,8 +1,8 @@
 // ── Protocol API (central, always-running) ──
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3005";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://protocol-api-production.up.railway.app";
 
 // ── Coordinator URL (dynamic, resolved from Ensue or env fallback) ──
-let _coordinatorUrl = process.env.NEXT_PUBLIC_COORDINATOR_URL || "http://localhost:3000";
+let _coordinatorUrl = process.env.NEXT_PUBLIC_COORDINATOR_URL || "https://coordinator-agent-production-49b6.up.railway.app";
 
 export function setActiveCoordinatorUrl(url: string) { _coordinatorUrl = url; }
 function getCoordinatorUrl(): string { return _coordinatorUrl; }
