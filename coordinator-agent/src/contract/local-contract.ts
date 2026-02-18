@@ -1,9 +1,10 @@
 /**
- * Local contract interaction via NEAR JSON-RPC (for LOCAL_MODE testing)
- * Uses direct RPC calls - no external dependencies needed
+ * Local contract interaction via near-api-js (for LOCAL_MODE)
+ * Uses seed phrase signing — no CLI binary needed.
  */
-import crypto from 'crypto';
 import { Buffer } from 'buffer';
+import { connect, keyStores, KeyPair, Account } from 'near-api-js';
+import { parseSeedPhrase } from 'near-seed-phrase';
 
 const NEAR_NETWORK = process.env.NEAR_NETWORK || 'testnet';
 const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
@@ -12,34 +13,59 @@ const SIGNER_ID = process.env.NEAR_ACCOUNT_ID
   || (NEAR_NETWORK === 'mainnet' ? 'agents-coordinator.near' : 'agents-coordinator.testnet');
 const NEAR_RPC = process.env.NEAR_RPC_JSON
   || (NEAR_NETWORK === 'mainnet' ? 'https://rpc.fastnear.com' : 'https://test.rpc.fastnear.com');
+const SEED_PHRASE = process.env.NEAR_SEED_PHRASE || '';
 
-// We use near CLI for transaction signing (sign-with-keychain)
-import { execSync } from 'child_process';
+/* ─── near-api-js setup ──────────────────────────────────────────────────── */
 
-const NEAR_CLI = process.env.NEAR_CLI_PATH || '/Users/manza/.cargo/bin/near';
+let _account: Account | null = null;
 
-function nearCliCall(methodName: string, args: Record<string, unknown>, gas: string = '200 Tgas'): string {
-  const argsJson = JSON.stringify(args);
-  const argsB64 = Buffer.from(argsJson).toString('base64');
-  const cmd = `${NEAR_CLI} contract call-function as-transaction ${CONTRACT_ID} ${methodName} base64-args '${argsB64}' prepaid-gas '${gas}' attached-deposit '0 NEAR' sign-as ${SIGNER_ID} network-config ${NEAR_NETWORK} sign-with-keychain send`;
-
-  console.log(`[CONTRACT] Calling ${methodName} with args (${argsJson.length} bytes)...`);
-  try {
-    const result = execSync(cmd, {
-      encoding: 'utf-8',
-      timeout: 60000,
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env, PATH: `${process.env.HOME}/.cargo/bin:/usr/local/bin:/usr/bin:/bin:${process.env.PATH}` },
-    });
-    console.log(`[CONTRACT] ${methodName} CLI output:`, result.substring(0, 500));
-    return result;
-  } catch (error: any) {
-    // Log both stdout and stderr from the failed command
-    if (error.stderr) console.error(`[CONTRACT] ${methodName} stderr:`, error.stderr.substring(0, 500));
-    if (error.stdout) console.log(`[CONTRACT] ${methodName} stdout:`, error.stdout.substring(0, 500));
-    throw error;
+async function getAccount(): Promise<Account> {
+  if (_account) return _account;
+  if (!SEED_PHRASE) {
+    throw new Error('NEAR_SEED_PHRASE is required for contract calls');
   }
+  const { secretKey } = parseSeedPhrase(SEED_PHRASE);
+  const keyStore = new keyStores.InMemoryKeyStore();
+  const keyPair = KeyPair.fromString(secretKey as any);
+  await keyStore.setKey(NEAR_NETWORK, SIGNER_ID, keyPair);
+
+  const near = await connect({
+    networkId: NEAR_NETWORK,
+    keyStore,
+    nodeUrl: NEAR_RPC,
+  });
+  _account = await near.account(SIGNER_ID);
+  return _account;
 }
+
+const GAS_200T = '200000000000000';
+const GAS_100T = '100000000000000';
+
+/**
+ * Call a change method on the contract using near-api-js.
+ * Returns the transaction outcome or null on failure.
+ */
+async function contractCall(
+  methodName: string,
+  args: Record<string, unknown>,
+  gas: string = GAS_200T,
+): Promise<any> {
+  const account = await getAccount();
+  console.log(`[CONTRACT] Calling ${methodName} (${JSON.stringify(args).length} bytes)...`);
+
+  const outcome = await account.functionCall({
+    contractId: CONTRACT_ID,
+    methodName,
+    args,
+    gas: BigInt(gas),
+    attachedDeposit: BigInt(0),
+  });
+
+  console.log(`[CONTRACT] ${methodName} tx sent`);
+  return outcome;
+}
+
+/* ─── View calls (no signing needed) ─────────────────────────────────────── */
 
 /**
  * View call via NEAR RPC (no signing needed)
@@ -73,6 +99,8 @@ export async function localViewCall<T>(methodName: string, args: Record<string, 
   }
 }
 
+/* ─── Change calls ───────────────────────────────────────────────────────── */
+
 /**
  * Call start_coordination on the contract (creates yield + pending request)
  */
@@ -80,28 +108,27 @@ export async function localStartCoordination(taskConfig: string): Promise<number
   const beforeId = await localViewCall<number>('get_current_proposal_id', {}) ?? 0;
 
   try {
-    nearCliCall('start_coordination', { task_config: taskConfig });
+    await contractCall('start_coordination', { task_config: taskConfig });
   } catch (error: any) {
-    // The CLI times out waiting for yield resolution, but the tx itself succeeds.
-    // Check if proposal was actually created by comparing proposal IDs.
+    // start_coordination uses yield/resume — the tx may time out waiting for
+    // the yield callback, but the proposal creation itself succeeds.
     const msg = error.message || '';
-    if (msg.includes('ETIMEDOUT') || msg.includes('timeout')) {
-      console.warn('[CONTRACT] CLI timed out (expected for yield/resume pattern), checking if tx succeeded...');
+    if (msg.includes('timeout') || msg.includes('ETIMEDOUT') || msg.includes('Timeout')) {
+      console.warn('[CONTRACT] start_coordination timed out (expected for yield/resume), checking if tx succeeded...');
     } else {
-      console.error('[CONTRACT] start_coordination failed:', msg.substring(0, 200));
-      return null;
+      console.error('[CONTRACT] start_coordination failed:', msg.substring(0, 300));
+      // Still check if proposal was created despite the error
     }
   }
 
-  // Wait a moment for the transaction to be finalized
+  // Wait for finalization
   await new Promise(r => setTimeout(r, 3000));
 
-  // Check if proposal ID incremented (meaning start_coordination succeeded)
+  // Check if proposal ID incremented
   const afterId = await localViewCall<number>('get_current_proposal_id', {}) ?? 0;
   if (afterId > beforeId) {
-    const proposalId = afterId; // Contract uses ++id then stores, so proposal = current_proposal_id
-    console.log(`[CONTRACT] start_coordination succeeded, proposal #${proposalId}`);
-    return proposalId;
+    console.log(`[CONTRACT] start_coordination succeeded, proposal #${afterId}`);
+    return afterId;
   }
 
   console.error('[CONTRACT] start_coordination did not create a new proposal');
@@ -110,87 +137,71 @@ export async function localStartCoordination(taskConfig: string): Promise<number
 
 /**
  * Record worker submissions on-chain (nullifier pattern)
- * Must be called after workers complete, before coordinator_resume
  */
 export async function localRecordWorkerSubmissions(
   proposalId: number,
   submissions: Array<{ worker_id: string; result_hash: string }>
 ): Promise<boolean> {
   try {
-    nearCliCall('record_worker_submissions', {
+    await contractCall('record_worker_submissions', {
       proposal_id: proposalId,
       submissions,
-    }, '100 Tgas');
+    }, GAS_100T);
 
     console.log(`[CONTRACT] record_worker_submissions succeeded for proposal #${proposalId} (${submissions.length} workers)`);
     return true;
   } catch (error: any) {
     const msg = error.message || '';
-    if (msg.includes('ETIMEDOUT') || msg.includes('timeout')) {
-      console.warn('[CONTRACT] record_worker_submissions CLI timed out, checking state...');
+    if (msg.includes('timeout') || msg.includes('ETIMEDOUT')) {
+      console.warn('[CONTRACT] record_worker_submissions timed out, checking state...');
       await new Promise(r => setTimeout(r, 3000));
 
-      // Verify by checking proposal state
       const proposal = await localViewCall<any>('get_proposal', { proposal_id: proposalId });
       if (proposal && proposal.state === 'WorkersCompleted') {
         console.log(`[CONTRACT] record_worker_submissions verified - proposal #${proposalId} in WorkersCompleted state`);
         return true;
       }
-      console.error(`[CONTRACT] record_worker_submissions may have failed for proposal #${proposalId}`);
-      return false;
     }
 
-    console.error(`[CONTRACT] record_worker_submissions failed:`, msg.substring(0, 200));
+    console.error(`[CONTRACT] record_worker_submissions failed:`, msg.substring(0, 300));
     return false;
   }
 }
 
-// ========== Worker Registration ==========
+/* ─── Worker Registration ────────────────────────────────────────────────── */
 
-/**
- * Register a worker on-chain
- */
 export async function localRegisterWorker(
   workerId: string,
   accountId?: string
 ): Promise<boolean> {
   try {
-    nearCliCall('register_worker', {
+    await contractCall('register_worker', {
       worker_id: workerId,
       account_id: accountId || null,
     });
     console.log(`[CONTRACT] register_worker succeeded: ${workerId}`);
     return true;
   } catch (error: any) {
-    console.error(`[CONTRACT] register_worker failed:`, (error.message || '').substring(0, 200));
+    console.error(`[CONTRACT] register_worker failed:`, (error.message || '').substring(0, 300));
     return false;
   }
 }
 
-/**
- * Remove a worker from the on-chain registry
- */
 export async function localRemoveWorker(workerId: string): Promise<boolean> {
   try {
-    nearCliCall('remove_worker', { worker_id: workerId });
+    await contractCall('remove_worker', { worker_id: workerId });
     console.log(`[CONTRACT] remove_worker succeeded: ${workerId}`);
     return true;
   } catch (error: any) {
-    console.error(`[CONTRACT] remove_worker failed:`, (error.message || '').substring(0, 200));
+    console.error(`[CONTRACT] remove_worker failed:`, (error.message || '').substring(0, 300));
     return false;
   }
 }
 
-/**
- * Get registered workers from contract (view call)
- */
 export async function localGetRegisteredWorkers(): Promise<any[]> {
   return await localViewCall<any[]>('get_registered_workers', {}) ?? [];
 }
 
-/**
- * Get active worker count from contract (view call)
- */
 export async function localGetWorkerCount(): Promise<number> {
   return await localViewCall<number>('get_worker_count', {}) ?? 0;
 }
@@ -205,30 +216,28 @@ export async function localCoordinatorResume(
   resultHash: string
 ): Promise<boolean> {
   try {
-    nearCliCall('coordinator_resume', {
+    await contractCall('coordinator_resume', {
       proposal_id: proposalId,
       aggregated_result: aggregatedResult,
       config_hash: configHash,
       result_hash: resultHash,
-    }, '100 Tgas');
+    }, GAS_100T);
 
     console.log(`[CONTRACT] coordinator_resume succeeded for proposal #${proposalId}`);
     return true;
   } catch (error: any) {
-    // CLI may time out waiting for yield callback receipts, but tx itself succeeds.
     const msg = error.message || '';
-    if (msg.includes('ETIMEDOUT') || msg.includes('timeout')) {
-      console.warn('[CONTRACT] coordinator_resume CLI timed out, verifying on-chain...');
+    // yield/resume may cause timeouts or receipt errors, but tx itself succeeds
+    if (msg.includes('timeout') || msg.includes('ETIMEDOUT')) {
+      console.warn('[CONTRACT] coordinator_resume timed out, verifying on-chain...');
       await new Promise(r => setTimeout(r, 5000));
 
-      // Verify by checking if the coordination was finalized
       const finalized = await localViewCall<string>('get_finalized_coordination', { proposal_id: proposalId });
       if (finalized) {
-        console.log(`[CONTRACT] coordinator_resume verified - proposal #${proposalId} finalized on-chain`);
+        console.log(`[CONTRACT] coordinator_resume verified - proposal #${proposalId} finalized`);
         return true;
       }
 
-      // Also check if it was at least removed from pending
       const pending = await localViewCall<[number, any][]>('get_pending_coordinations', { from_index: null, limit: null });
       const stillPending = pending?.some(([id]) => id === proposalId);
       if (!stillPending) {
@@ -240,7 +249,7 @@ export async function localCoordinatorResume(
       return false;
     }
 
-    console.error(`[CONTRACT] coordinator_resume failed:`, msg.substring(0, 200));
+    console.error(`[CONTRACT] coordinator_resume failed:`, msg.substring(0, 300));
     return false;
   }
 }
