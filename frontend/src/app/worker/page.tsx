@@ -25,167 +25,76 @@ const STATE_COLORS: Record<ProposalState, string> = {
   TimedOut: "bg-red-500/20 text-red-400 border-red-500/30",
 };
 
-export default function WorkerDashboard() {
-  const { accountId, role, workerId, connect, disconnect, connecting } = useAuth();
+export default function WorkerDashboardHub() {
+  const { accountId, role, workerId, connect, disconnect, connecting, forceConnect } = useAuth();
 
-  const coordFetcher = useCallback(getCoordinatorStatus, []);
-  const workerFetcher = useCallback(getWorkerStatuses, []);
-  const chainFetcher = useCallback(getOnChainState, []);
+  // If already connected as a known worker, we can either show the hub or redirect.
+  // For now, let's show the hub as a "Worker Central".
 
-  const { data: coordStatus } = usePolling<CoordinatorStatus>(coordFetcher, 2000);
-  const { data: workerStatuses, error: workerError } =
-    usePolling<WorkerStatuses>(workerFetcher, 2000);
-  const { data: chainState } = usePolling<OnChainState>(chainFetcher, 5000);
+  return (
+    <PageShell accountId={accountId} onDisconnect={disconnect}>
+      <div className="flex flex-col items-center justify-center py-10">
+        <h2 className="text-xl font-bold text-zinc-100 font-mono mb-8">// Worker Central</h2>
+        
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 w-full max-w-3xl">
+          <WorkerLink 
+            id="worker1" 
+            account="worker1.agents-coordinator.testnet" 
+            active={accountId === "worker1.agents-coordinator.testnet"}
+          />
+          <WorkerLink 
+            id="worker2" 
+            account="worker2.agents-coordinator.testnet" 
+            active={accountId === "worker2.agents-coordinator.testnet"}
+          />
+          <WorkerLink 
+            id="worker3" 
+            account="worker3.agents-coordinator.testnet" 
+            active={accountId === "worker3.agents-coordinator.testnet"}
+          />
+        </div>
 
-  // Not connected — show connect prompt
-  if (!accountId) {
-    return (
-      <PageShell>
-        <div className="flex flex-col items-center justify-center py-20">
-          <p className="text-sm text-zinc-500 font-mono mb-6">
-            Connect your NEAR wallet to view your worker dashboard
+        <div className="mt-16 pt-8 border-t border-zinc-800 w-full flex flex-col items-center">
+          <p className="text-xs text-zinc-600 font-mono mb-4">
+            Custom setup? Use your own wallet
           </p>
           <button
             onClick={connect}
             disabled={connecting}
-            className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30
-                       text-sm font-semibold text-[#00ff41] font-mono
-                       hover:bg-[#00ff41]/15 transition-all disabled:opacity-40"
+            className="px-6 py-2 rounded border border-zinc-700 text-zinc-400 font-mono text-xs
+                       hover:border-zinc-600 hover:text-zinc-300 transition-all disabled:opacity-40"
           >
-            {connecting ? "connecting..." : "connect wallet"}
+            {connecting ? "connecting..." : (accountId ? "switch wallet" : "connect manual wallet")}
           </button>
         </div>
-      </PageShell>
-    );
-  }
-
-  // Connected but not a registered worker
-  if (role !== "worker" || !workerId) {
-    return (
-      <PageShell accountId={accountId} onDisconnect={disconnect}>
-        <div className="flex flex-col items-center justify-center py-20">
-          <p className="text-sm text-zinc-500 font-mono mb-2">
-            Account <span className="text-zinc-300">{accountId}</span> is not a registered worker.
-          </p>
-          <p className="text-xs text-zinc-600 font-mono mb-6">
-            Ask the coordinator to register your account.
-          </p>
-          <Link
-            href="/dashboard"
-            className="text-xs px-4 py-2 rounded border border-zinc-700 text-zinc-400 font-mono
-                       hover:border-zinc-600 hover:text-zinc-300 transition-all"
-          >
-            go to coordinator dashboard
-          </Link>
-        </div>
-      </PageShell>
-    );
-  }
-
-  // Authenticated worker view
-  const myStatus = workerStatuses?.workers[workerId] || "unknown";
-
-  // Find finalized proposals to show aggregate decisions (no other workers' details)
-  const proposals = chainState?.proposals ?? [];
-  const finalizedProposals = proposals
-    .filter((p) => p.proposal.state === "Finalized")
-    .slice(-10)
-    .reverse();
-
-  return (
-    <PageShell accountId={accountId} onDisconnect={disconnect}>
-      {/* Worker identity banner */}
-      <div className="flex items-center gap-3 mb-6 p-3 rounded border border-zinc-800 bg-[#0a0f0a]/80">
-        <StatusDot status={workerError ? "offline" : myStatus} />
-        <div>
-          <span className="text-sm font-semibold text-zinc-100 font-mono">{workerId}</span>
-          <span className="text-xs text-zinc-600 ml-2 font-mono">{accountId}</span>
-        </div>
-        <span className="ml-auto text-xs font-mono px-2 py-1 rounded-md bg-zinc-800 text-zinc-400">
-          {myStatus}
-        </span>
-      </div>
-
-      {/* Agent Endpoint Config */}
-      <AgentEndpointConfig agentId={workerId} />
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mb-6">
-        {/* Own Identity (full WorkerCard with identity expansion) */}
-        <WorkerCard
-          workerId={workerId}
-          label={workerId}
-          port={0}
-          status={workerError ? "offline" : myStatus}
-        />
-
-        {/* Current proposal status */}
-        <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
-          <h3 className="text-sm font-semibold text-zinc-100 mb-3 font-mono">
-            // Current Proposal
-          </h3>
-          {coordStatus?.status === "idle" || !coordStatus ? (
-            <p className="text-xs text-zinc-600 font-mono">No active proposal</p>
-          ) : (
-            <div className="space-y-2">
-              <div className="flex items-center gap-2 text-xs">
-                <StatusDot status={coordStatus.status} />
-                <span className="text-zinc-400 font-mono">{coordStatus.status}</span>
-                {coordStatus.proposalId != null && (
-                  <span className="text-zinc-600 font-mono">
-                    Proposal #{coordStatus.proposalId}
-                  </span>
-                )}
-              </div>
-              <div className="text-[10px] text-zinc-500">
-                Your status: <span className="text-zinc-300 font-mono">{myStatus}</span>
-              </div>
-              {/* Show aggregate tally only (not individual worker votes) */}
-              {coordStatus.tally && (
-                <div className="p-2.5 rounded-lg bg-green-950/30 border border-green-900/40">
-                  <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-green-900/60 text-green-400">
-                    AGGREGATE RESULT
-                  </span>
-                  <p
-                    className={`text-lg font-bold mt-1 ${
-                      coordStatus.tally.decision === "Approved"
-                        ? "text-green-400"
-                        : "text-red-400"
-                    }`}
-                  >
-                    {coordStatus.tally.decision}
-                  </p>
-                  <div className="flex gap-3 mt-1 text-[10px] text-zinc-500">
-                    <span className="text-green-400">{coordStatus.tally.approved}Y</span>
-                    <span className="text-red-400">{coordStatus.tally.rejected}N</span>
-                    <span>{coordStatus.tally.workerCount} agents</span>
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* Finalized Proposals (aggregate only — no individual worker data) */}
-      <div className="rounded-xl border border-zinc-800 bg-[#0a0f0a]/80 p-5">
-        <h3 className="text-sm font-semibold text-zinc-100 mb-4 font-mono">
-          // Past Decisions (On-Chain)
-        </h3>
-        {finalizedProposals.length === 0 ? (
-          <p className="text-xs text-zinc-600 font-mono">No finalized proposals yet</p>
-        ) : (
-          <div className="space-y-1.5 max-h-60 overflow-y-auto">
-            {finalizedProposals.map(({ proposalId, proposal }) => (
-              <FinalizedProposalRow
-                key={proposalId}
-                proposalId={proposalId}
-                proposal={proposal}
-              />
-            ))}
-          </div>
-        )}
       </div>
     </PageShell>
+  );
+}
+
+function WorkerLink({ id, account, active }: { id: string; account: string; active?: boolean }) {
+  return (
+    <Link 
+      href={`/${id}`}
+      className={`flex flex-col items-center p-6 rounded-xl border transition-all hover:scale-105 ${
+        active 
+          ? "bg-[#00ff41]/5 border-[#00ff41]/30 text-[#00ff41]" 
+          : "bg-zinc-900/50 border-zinc-800 text-zinc-400 hover:border-zinc-700"
+      }`}
+    >
+      <div className={`h-12 w-12 rounded-full mb-4 flex items-center justify-center ${
+        active ? "bg-[#00ff41]/20" : "bg-zinc-800"
+      }`}>
+        <span className="text-lg font-bold">W{id.slice(-1)}</span>
+      </div>
+      <span className="text-sm font-bold font-mono uppercase mb-1">{id}</span>
+      <span className="text-[10px] opacity-40 font-mono truncate w-full text-center">{account}</span>
+      {active && (
+        <span className="mt-3 text-[9px] font-bold px-1.5 py-0.5 rounded bg-[#00ff41]/10 border border-[#00ff41]/20">
+          ACTIVE SESSION
+        </span>
+      )}
+    </Link>
   );
 }
 
