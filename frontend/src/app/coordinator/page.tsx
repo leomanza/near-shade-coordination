@@ -23,7 +23,7 @@ import {
 import Link from "next/link";
 
 export default function CoordinatorDashboard() {
-  const { accountId, role, connect, disconnect, connecting } = useAuth();
+  const { accountId, role, connect, forceConnect, disconnect, connecting } = useAuth();
 
   // Not connected — show connect prompt
   if (!accountId) {
@@ -34,13 +34,13 @@ export default function CoordinatorDashboard() {
             Connect your NEAR wallet to access the coordinator dashboard
           </p>
           <button
-            onClick={connect}
+            onClick={() => forceConnect("agents-coordinator.testnet")}
             disabled={connecting}
             className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30
                        text-sm font-semibold text-[#00ff41] font-mono
                        hover:bg-[#00ff41]/15 transition-all disabled:opacity-40"
           >
-            {connecting ? "connecting..." : "connect wallet"}
+            {connecting ? "connecting..." : "connect as coordinator"}
           </button>
         </div>
       </PageShell>

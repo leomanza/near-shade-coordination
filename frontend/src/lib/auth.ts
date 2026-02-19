@@ -26,6 +26,8 @@ export interface AuthState {
   connecting: boolean;
   /** Connect wallet — opens near-connect selector */
   connect: () => Promise<void>;
+  /** Force connect to a specific account (mock login) */
+  forceConnect: (accountId: string) => Promise<void>;
   /** Disconnect wallet */
   disconnect: () => Promise<void>;
 }
@@ -38,6 +40,7 @@ const AuthContext = createContext<AuthState>({
   workerId: null,
   connecting: false,
   connect: async () => {},
+  forceConnect: async () => {},
   disconnect: async () => {},
 });
 
@@ -103,20 +106,29 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     });
 
     // Check for existing connection
-    connector
-      .getConnectedWallet()
-      .then(async ({ accounts }) => {
-        if (accounts.length > 0) {
-          const id = accounts[0].accountId;
-          setAccountId(id);
-          const detected = await detectRole(id);
-          setRole(detected.role);
-          setWorkerId(detected.workerId);
-        }
-      })
-      .catch(() => {
-        // No connected wallet — that's fine
+    const forcedId = localStorage.getItem("forcedAccountId");
+    if (forcedId) {
+      setAccountId(forcedId);
+      detectRole(forcedId).then((detected) => {
+        setRole(detected.role);
+        setWorkerId(detected.workerId);
       });
+    } else {
+      connector
+        .getConnectedWallet()
+        .then(async ({ accounts }) => {
+          if (accounts.length > 0) {
+            const id = accounts[0].accountId;
+            setAccountId(id);
+            const detected = await detectRole(id);
+            setRole(detected.role);
+            setWorkerId(detected.workerId);
+          }
+        })
+        .catch(() => {
+          // No connected wallet — that's fine
+        });
+    }
   }, []);
 
   const connect = useCallback(async () => {
@@ -132,9 +144,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const detected = await detectRole(id);
         setRole(detected.role);
         setWorkerId(detected.workerId);
+        localStorage.removeItem("forcedAccountId");
       }
     } catch (err) {
       console.error("Wallet connection failed:", err);
+    } finally {
+      setConnecting(false);
+    }
+  }, []);
+
+  const forceConnect = useCallback(async (id: string) => {
+    setConnecting(true);
+    try {
+      setAccountId(id);
+      const detected = await detectRole(id);
+      setRole(detected.role);
+      setWorkerId(detected.workerId);
+      localStorage.setItem("forcedAccountId", id);
+      // If we are force connecting, we should disconnect the real wallet if any
+      const connector = connectorRef.current;
+      if (connector) {
+        connector.disconnect().catch(() => {});
+      }
+    } catch (err) {
+      console.error("Force connection failed:", err);
     } finally {
       setConnecting(false);
     }
@@ -151,12 +184,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setAccountId(null);
     setRole("none");
     setWorkerId(null);
+    localStorage.removeItem("forcedAccountId");
   }, []);
 
   return createElement(
     AuthContext.Provider,
     {
-      value: { accountId, role, workerId, connecting, connect, disconnect },
+      value: { accountId, role, workerId, connecting, connect, forceConnect, disconnect },
     },
     children
   );
