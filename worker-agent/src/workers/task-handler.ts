@@ -1,4 +1,4 @@
-import { EnsueClient, createEnsueClient } from '@near-shade-coordination/shared';
+import { EnsueClient, createEnsueClient, MEMORY_KEYS } from '@near-shade-coordination/shared';
 import { TaskStatus, getWorkerKeys } from '@near-shade-coordination/shared';
 import type { TaskConfig, WorkerResult, WorkerStatusInfo, VoteResult, VerificationProof } from '@near-shade-coordination/shared';
 import { aiVote } from './ai-voter';
@@ -266,6 +266,45 @@ export async function initializeWorker(): Promise<void> {
     console.error(`[${WORKER_ID}] Failed to initialize worker:`, error);
     throw error;
   }
+}
+
+/**
+ * Poll Ensue for pending tasks and auto-execute them.
+ * This enables workers to self-trigger without needing direct HTTP calls from the coordinator.
+ * Required for Phala production mode where coordinator only writes to Ensue (no LOCAL_MODE HTTP trigger).
+ */
+export function startWorkerPollingLoop(): void {
+  const POLL_INTERVAL = Number(process.env.WORKER_POLL_INTERVAL) || 3000;
+  console.log(`[${WORKER_ID}] Starting Ensue polling loop (interval: ${POLL_INTERVAL}ms)...`);
+
+  let isExecuting = false;
+
+  setInterval(async () => {
+    if (isExecuting) return;
+    try {
+      const status = await getEnsueClient().readMemory(workerKeys.STATUS);
+      if (status !== 'pending') return;
+
+      const taskConfigStr = await getEnsueClient().readMemory(MEMORY_KEYS.CONFIG_TASK_DEFINITION);
+      if (!taskConfigStr) {
+        console.warn(`[${WORKER_ID}] Status is 'pending' but no task config found in Ensue`);
+        return;
+      }
+
+      const taskConfig: TaskConfig = JSON.parse(taskConfigStr);
+      console.log(`[${WORKER_ID}] Detected pending task in Ensue, auto-executing...`);
+
+      isExecuting = true;
+      try {
+        await executeTask(taskConfig);
+      } finally {
+        isExecuting = false;
+      }
+    } catch (error) {
+      isExecuting = false;
+      console.error(`[${WORKER_ID}] Polling loop error:`, error);
+    }
+  }, POLL_INTERVAL);
 }
 
 // Initialization is called from index.ts after dotenv loads

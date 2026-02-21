@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { deployCvm, getCvmStatus } from '../phala/phala-client';
+import { deployCvm, getCvmStatus, watchForEndpoint } from '../phala/phala-client';
 import { execSync } from 'child_process';
 import { Buffer } from 'buffer';
 import * as fs from 'fs';
@@ -204,12 +204,22 @@ async function deployCoordinator(c: any, body: DeployRequest) {
   const cvmName = `delibera-coord-${body.name}-${suffix}`;
   const result = await deployCvm(body.phalaApiKey, cvmName, composeContent, envs);
 
-  console.log(`[deploy] Coordinator "${body.name}" deployed: CVM ${result.cvmId}, dashboard: ${result.dashboardUrl}, endpoint: ${result.endpointUrl}`);
+  console.log(`[deploy] Coordinator "${body.name}" deployed: CVM ${result.cvmId}, status: ${result.status}, endpoint: ${result.endpointUrl || 'pending'}`);
 
-  await updateRegistryEndpoint('coordinator', body.name, {
-    endpointUrl: result.endpointUrl,
-    cvmId: result.cvmId,
-  });
+  if (result.endpointUrl) {
+    // Endpoint already known — update registry now
+    await updateRegistryEndpoint('coordinator', body.name, {
+      endpointUrl: result.endpointUrl,
+      cvmId: result.cvmId,
+    });
+  } else {
+    // Not ready yet — register CVM ID now, update endpoint in background when available
+    await updateRegistryEndpoint('coordinator', body.name, { cvmId: result.cvmId });
+    const coordName = body.name;
+    watchForEndpoint(body.phalaApiKey!, result.cvmId, async (url) => {
+      await updateRegistryEndpoint('coordinator', coordName, { endpointUrl: url, cvmId: result.cvmId });
+    }).catch(e => console.error('[deploy] Background coordinator endpoint watch error:', e));
+  }
 
   return c.json({
     success: true,
@@ -260,13 +270,23 @@ async function deployWorker(c: any, body: DeployRequest) {
   const cvmName = `delibera-worker-${body.name}-${suffix}`;
   const result = await deployCvm(body.phalaApiKey, cvmName, composeContent, envs);
 
-  console.log(`[deploy] Worker "${body.name}" deployed: CVM ${result.cvmId}, dashboard: ${result.dashboardUrl}, endpoint: ${result.endpointUrl}`);
+  console.log(`[deploy] Worker "${body.name}" deployed: CVM ${result.cvmId}, status: ${result.status}, endpoint: ${result.endpointUrl || 'pending'}`);
 
   if (registryWorkerId) {
-    await updateRegistryEndpoint('worker', registryWorkerId, {
-      endpointUrl: result.endpointUrl,
-      cvmId: result.cvmId,
-    });
+    if (result.endpointUrl) {
+      // Endpoint already known — update registry now
+      await updateRegistryEndpoint('worker', registryWorkerId, {
+        endpointUrl: result.endpointUrl,
+        cvmId: result.cvmId,
+      });
+    } else {
+      // Not ready yet — register CVM ID now, update endpoint in background when available
+      await updateRegistryEndpoint('worker', registryWorkerId, { cvmId: result.cvmId });
+      const watchWorkerId = registryWorkerId;
+      watchForEndpoint(body.phalaApiKey!, result.cvmId, async (url) => {
+        await updateRegistryEndpoint('worker', watchWorkerId, { endpointUrl: url, cvmId: result.cvmId });
+      }).catch(e => console.error('[deploy] Background worker endpoint watch error:', e));
+    }
   }
 
   return c.json({

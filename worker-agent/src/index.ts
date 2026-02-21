@@ -7,7 +7,7 @@ import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
 import taskRoute from './routes/task';
 import knowledgeRoute from './routes/knowledge';
-import { initializeWorker } from './workers/task-handler';
+import { initializeWorker, startWorkerPollingLoop } from './workers/task-handler';
 
 const WORKER_ID = process.env.WORKER_ID || 'worker';
 
@@ -50,4 +50,6 @@ console.log(`Nova SDK configured: ${process.env.NOVA_API_KEY ? 'YES' : 'NO'}`);
 serve({ fetch: app.fetch, port }, async (info) => {
   console.log(`Worker Agent (${WORKER_ID}) running at http://localhost:${info.port}`);
   await initializeWorker();
+  // Poll Ensue for pending tasks so workers self-trigger in Phala production (no LOCAL_MODE HTTP trigger)
+  startWorkerPollingLoop();
 });

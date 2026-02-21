@@ -458,6 +458,20 @@ export async function deployToPhala(params: DeployRequest): Promise<DeployRespon
   }, 60000);
 }
 
+/**
+ * Poll Phala CVM status to discover the public endpoint URL.
+ * Returns the first app URL from public_urls, or null if not yet available.
+ */
+export async function pollDeployEndpoint(cvmId: string, phalaApiKey: string): Promise<string | null> {
+  const data = await safeFetch<any>(
+    `${API_URL}/api/deploy/status/${cvmId}`,
+    { headers: { "x-phala-api-key": phalaApiKey } },
+    10000,
+  );
+  const url = data?.public_urls?.find((u: any) => u.app && u.app.trim())?.app;
+  return url ?? null;
+}
+
 // ── Nova / Agent Identity API (direct to worker) ──
 
 export interface AgentManifesto {

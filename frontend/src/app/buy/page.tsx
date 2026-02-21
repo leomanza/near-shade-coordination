@@ -9,6 +9,7 @@ import {
   getRegistryStats,
   deployToPhala,
   updateAgentEndpoint,
+  pollDeployEndpoint,
   type RegistryCoordinator,
   type DeployResponse,
 } from "@/lib/api";
@@ -167,6 +168,8 @@ function CoordinatorForm({ accountId }: { accountId: string }) {
   const [deploying, setDeploying] = useState(false);
   const [result, setResult] = useState<DeployResponse | null>(null);
   const [paymentDone, setPaymentDone] = useState(false);
+  const [endpointPolling, setEndpointPolling] = useState(false);
+  const [discoveredEndpoint, setDiscoveredEndpoint] = useState<string | null>(null);
 
   // Restore form state after PingPay redirect
   useEffect(() => {
@@ -194,6 +197,7 @@ function CoordinatorForm({ accountId }: { accountId: string }) {
   async function handleDeploy() {
     setDeploying(true);
     setResult(null);
+    setDiscoveredEndpoint(null);
     const res = await deployToPhala({
       type: "coordinator",
       name,
@@ -205,12 +209,34 @@ function CoordinatorForm({ accountId }: { accountId: string }) {
       sponsorPrivateKey,
       agentContractId: agentContractId || undefined,
     });
-    // Save the deployed coordinator's endpoint URL to Ensue
-    if (res?.success && res.endpointUrl && res.name) {
-      updateAgentEndpoint(res.name, res.endpointUrl, res.cvmId, res.dashboardUrl);
-    }
     setResult(res);
     setDeploying(false);
+
+    if (res?.success && res.cvmId && phalaApiKey) {
+      if (res.endpointUrl) {
+        // Endpoint already registered (quick provision)
+        setDiscoveredEndpoint(res.endpointUrl);
+        if (res.name) updateAgentEndpoint(res.name, res.endpointUrl, res.cvmId, res.dashboardUrl);
+      } else {
+        // Still provisioning — poll until endpoint appears, then register
+        setEndpointPolling(true);
+        pollUntilEndpoint(res.cvmId, phalaApiKey, res.name || name, res.dashboardUrl);
+      }
+    }
+  }
+
+  async function pollUntilEndpoint(cvmId: string, apiKey: string, agentName: string, dashboardUrl?: string) {
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 15000));
+      const url = await pollDeployEndpoint(cvmId, apiKey);
+      if (url) {
+        setDiscoveredEndpoint(url);
+        setEndpointPolling(false);
+        await updateAgentEndpoint(agentName, url, cvmId, dashboardUrl);
+        return;
+      }
+    }
+    setEndpointPolling(false);
   }
 
   // Persist form state so it survives PingPay redirect
@@ -290,17 +316,28 @@ function CoordinatorForm({ accountId }: { accountId: string }) {
           <div className={`p-3 rounded text-xs font-mono ${result.success ? "bg-green-950/30 border border-green-900/40 text-green-400" : "bg-red-950/30 border border-red-900/40 text-red-400"}`}>
             {result.success ? (
               result.cvmId ? (
-                <span>
-                  Deployed! CVM ID: {result.cvmId}
-                  {result.dashboardUrl && (
-                    <>
-                      {" — "}
-                      <a href={result.dashboardUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-green-300">
-                        view dashboard
-                      </a>
-                    </>
-                  )}
-                </span>
+                <div className="space-y-1">
+                  <div>
+                    Deployed! CVM ID: {result.cvmId}
+                    {result.dashboardUrl && (
+                      <>
+                        {" — "}
+                        <a href={result.dashboardUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-green-300">
+                          view dashboard
+                        </a>
+                      </>
+                    )}
+                  </div>
+                  {discoveredEndpoint ? (
+                    <div className="text-[10px] text-emerald-400">
+                      Endpoint registered: <span className="break-all">{discoveredEndpoint}</span>
+                    </div>
+                  ) : endpointPolling ? (
+                    <div className="text-[10px] text-yellow-500 animate-pulse">
+                      Waiting for Phala endpoint URL... (checks every 15s, may take a few minutes)
+                    </div>
+                  ) : null}
+                </div>
               ) : "Registered locally!"
             ) : `Error: ${result.error}`}
           </div>
@@ -326,6 +363,8 @@ function WorkerForm({ accountId }: { accountId: string }) {
   const [deploying, setDeploying] = useState(false);
   const [result, setResult] = useState<DeployResponse | null>(null);
   const [paymentDone, setPaymentDone] = useState(false);
+  const [endpointPolling, setEndpointPolling] = useState(false);
+  const [discoveredEndpoint, setDiscoveredEndpoint] = useState<string | null>(null);
 
   useEffect(() => {
     getActiveCoordinators().then((c) => setCoordinators(c ?? []));
@@ -358,6 +397,7 @@ function WorkerForm({ accountId }: { accountId: string }) {
   async function handleDeploy() {
     setDeploying(true);
     setResult(null);
+    setDiscoveredEndpoint(null);
     const res = await deployToPhala({
       type: "worker",
       name,
@@ -370,12 +410,32 @@ function WorkerForm({ accountId }: { accountId: string }) {
       novaGroupId: novaGroupId || undefined,
       coordinatorId: coordinatorId || undefined,
     });
-    // Save the deployed worker's endpoint URL to Ensue for future API calls
-    if (res?.success && res.endpointUrl && res.name) {
-      updateAgentEndpoint(res.name, res.endpointUrl, res.cvmId, res.dashboardUrl);
-    }
     setResult(res);
     setDeploying(false);
+
+    if (res?.success && res.cvmId && phalaApiKey) {
+      if (res.endpointUrl) {
+        setDiscoveredEndpoint(res.endpointUrl);
+        if (res.name) updateAgentEndpoint(res.name, res.endpointUrl, res.cvmId, res.dashboardUrl);
+      } else {
+        setEndpointPolling(true);
+        pollUntilEndpoint(res.cvmId, phalaApiKey, res.name || name, res.dashboardUrl);
+      }
+    }
+  }
+
+  async function pollUntilEndpoint(cvmId: string, apiKey: string, agentName: string, dashboardUrl?: string) {
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 15000));
+      const url = await pollDeployEndpoint(cvmId, apiKey);
+      if (url) {
+        setDiscoveredEndpoint(url);
+        setEndpointPolling(false);
+        await updateAgentEndpoint(agentName, url, cvmId, dashboardUrl);
+        return;
+      }
+    }
+    setEndpointPolling(false);
   }
 
   // Persist form state so it survives PingPay redirect
@@ -468,17 +528,28 @@ function WorkerForm({ accountId }: { accountId: string }) {
           <div className={`p-3 rounded text-xs font-mono ${result.success ? "bg-green-950/30 border border-green-900/40 text-green-400" : "bg-red-950/30 border border-red-900/40 text-red-400"}`}>
             {result.success ? (
               result.cvmId ? (
-                <span>
-                  Deployed! CVM ID: {result.cvmId}
-                  {result.dashboardUrl && (
-                    <>
-                      {" — "}
-                      <a href={result.dashboardUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-green-300">
-                        view dashboard
-                      </a>
-                    </>
-                  )}
-                </span>
+                <div className="space-y-1">
+                  <div>
+                    Deployed! CVM ID: {result.cvmId}
+                    {result.dashboardUrl && (
+                      <>
+                        {" — "}
+                        <a href={result.dashboardUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-green-300">
+                          view dashboard
+                        </a>
+                      </>
+                    )}
+                  </div>
+                  {discoveredEndpoint ? (
+                    <div className="text-[10px] text-emerald-400">
+                      Endpoint registered: <span className="break-all">{discoveredEndpoint}</span>
+                    </div>
+                  ) : endpointPolling ? (
+                    <div className="text-[10px] text-yellow-500 animate-pulse">
+                      Waiting for Phala endpoint URL... (checks every 15s, may take a few minutes)
+                    </div>
+                  ) : null}
+                </div>
               ) : "Registered locally!"
             ) : `Error: ${result.error}`}
           </div>

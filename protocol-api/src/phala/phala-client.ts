@@ -70,15 +70,10 @@ export async function deployCvm(
   const vmUuid = (result as any).vm_uuid ?? String((result as any).id);
   console.log(`[phala] CVM created: ${vmUuid}`);
 
-  // Step 4: Poll for public endpoint URL (shade-agent-cli pattern)
-  const endpointUrl = await getAppUrl(apiKey, vmUuid);
-  console.log(`[phala] Endpoint URL: ${endpointUrl || 'not yet available'}`);
-
-  // Step 5: Wait for app to actually respond (if we got a URL)
-  if (endpointUrl) {
-    const ready = await waitForAppReady(endpointUrl);
-    console.log(`[phala] App ready: ${ready}`);
-  }
+  // Step 4: Quick poll for public endpoint URL (3 attempts × 5s = 15s).
+  // If not ready yet, caller should use watchForEndpoint() in the background.
+  const endpointUrl = await getAppUrl(apiKey, vmUuid, 3, 5000);
+  console.log(`[phala] Endpoint URL: ${endpointUrl || 'not yet available — background watch started'}`);
 
   return {
     cvmId: vmUuid,
@@ -87,6 +82,32 @@ export async function deployCvm(
     appId: provision.app_id ?? '',
     endpointUrl,
   };
+}
+
+/**
+ * Background-poll for a CVM's public endpoint URL and call onFound() when available.
+ * Call without await — runs as a fire-and-forget background task.
+ * Pattern: shade-agent-cli polls GET /api/v1/cvms/{id} for public_urls[].app
+ */
+export async function watchForEndpoint(
+  apiKey: string,
+  cvmId: string,
+  onFound: (url: string) => Promise<void>,
+  maxMinutes = 15,
+): Promise<void> {
+  const attempts = maxMinutes * 4; // every 15s
+  console.log(`[phala] Background: watching for endpoint of ${cvmId} (up to ${maxMinutes}min)...`);
+  const url = await getAppUrl(apiKey, cvmId, attempts, 15000);
+  if (url) {
+    console.log(`[phala] Background: found endpoint for ${cvmId}: ${url}`);
+    try {
+      await onFound(url);
+    } catch (e) {
+      console.error(`[phala] Background: onFound callback failed for ${cvmId}:`, e);
+    }
+  } else {
+    console.warn(`[phala] Background: gave up waiting for endpoint of ${cvmId} after ${maxMinutes}min`);
+  }
 }
 
 /**
