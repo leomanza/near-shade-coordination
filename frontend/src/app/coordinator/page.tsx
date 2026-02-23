@@ -240,7 +240,8 @@ function CoordinatorContent() {
         {workers.length === 0 && (
           <span className="text-xs text-zinc-600 font-mono">No registered workers</span>
         )}
-        <div className="ml-auto">
+        {/* Hide reset button for now since it's a bit risky and we don't have a good UI for confirming it */}
+        {/* <div className="ml-auto">
           <button
             onClick={handleReset}
             disabled={resetting || !coordinatorOnline}
@@ -250,7 +251,7 @@ function CoordinatorContent() {
           >
             {resetting ? "resetting..." : "reset memory"}
           </button>
-        </div>
+        </div> */}
       </div>
 
       {/* Coordinator Endpoint Config */}
