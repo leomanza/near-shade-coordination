@@ -10,7 +10,7 @@ Anyone can look at the record book to see "3 Approved, 0 Rejected — Decision: 
 
 ## Technical Overview
 
-The system implements a **privacy-preserving multi-agent voting protocol** with three layers:
+The system implements a **privacy-preserving multi-agent voting protocol** with multiple layers:
 
 - **Settlement layer (NEAR blockchain)** — A Rust smart contract using NEAR's [yield/resume](https://docs.near.org/ai/shade-agents/tutorials/ai-dao/overview) pattern. When a proposal is submitted, the contract creates a yielded promise that suspends execution until an off-chain coordinator provides the aggregated result. The contract enforces integrity via SHA256 hash verification of both the task configuration and the aggregated result, and prevents double-voting through a nullifier pattern (one submission hash per worker per proposal). Only TEE-registered coordinators with owner-approved codehashes can settle results.
 
@@ -18,12 +18,21 @@ The system implements a **privacy-preserving multi-agent voting protocol** with 
 
 - **Computation layer (AI Voter Agents)** — Three independent TypeScript agents, each running in a Phala TEE (Intel TDX). Each agent fetches the DAO manifesto from the contract via NEAR RPC, then calls the NEAR AI API (DeepSeek-V3.1 with OpenAI-compatible function calling) to deliberate on the proposal. The AI returns a structured `{vote, reasoning}` response via a forced `dao_vote` tool call. Votes are written to each agent's private Ensue namespace. The coordinator reads all votes, computes an aggregate tally, records nullifier hashes on-chain, and resumes the contract with only `{approved, rejected, decision, workerCount}`.
 
+- **Encrypted persistence layer (Storacha + Lit Protocol)** — All sensitive deliberation data is encrypted with Lit Protocol threshold keys before being uploaded to Storacha for persistent, content-addressed storage. Access Control Conditions (ACCs) tied to NEAR contract state determine who can decrypt. Storacha automatically creates Filecoin storage deals for permanent archival.
+
+- **Confidential voting layer (Zama fhEVM)** — For high-stakes proposals, votes are cast as Fully Homomorphic Encrypted (FHE) values on a Zama fhEVM chain. `FHE.add()` accumulates encrypted votes on-chain — no plaintext is ever visible. After the deadline, a Phala TEE finalizes and decrypts the aggregate.
+
+- **Verifiable randomness layer (Flow VRF)** — Fair jury selection uses Flow blockchain's built-in VRF (`revertibleRandom`) to generate verifiable random seeds. A deterministic Fisher-Yates shuffle selects jurors from a candidate pool, and the same seed always produces the same jury for auditability.
+
 **Key design properties:**
 - **Ballot privacy** — Individual votes are never on-chain; only the aggregate tally is settled
 - **Tamper resistance** — SHA256 hashes verify config and result integrity end-to-end
 - **Double-vote prevention** — On-chain nullifier ensures each worker submits exactly once per proposal
 - **Verifiable execution** — TEE attestation (DCAP) ensures only approved code can settle results
 - **Asynchronous coordination** — Ensue decouples agents that can't directly communicate in TEE isolation
+- **Encrypted persistence** — All deliberation data is encrypted at rest with threshold keys
+- **Permanent archival** — Finalized records are archived to Filecoin via Storacha's automatic deal pipeline
+- **Verifiable fairness** — Flow VRF provides cryptographic proof of fair jury selection
 
 ---
 
@@ -50,12 +59,14 @@ The system implements a **privacy-preserving multi-agent voting protocol** with 
                  │  - Tallies votes              │
                  │  - Records nullifiers         │
                  │  - Resumes contract           │
+                 │  - Backs up to Storacha       │
+                 │  - Archives to Filecoin       │
                  └───┬──────────┬──────────┬────┘
                 read │    read  │    read  │
                  ┌───┴──────────┴──────────┴────┐
                  │                               │
-                 │   Ensue Shared Memory          │
-                 │   (off-chain, permissioned)    │
+                 │   Ensue Shared Memory (Hot)   │
+                 │   (off-chain, permissioned)   │
                  │                               │
                  └───┬──────────┬──────────┬────┘
                write │    write │    write │
@@ -63,10 +74,33 @@ The system implements a **privacy-preserving multi-agent voting protocol** with 
               │Voter 1│  │Voter 2 │  │Voter 3   │
               │(:3001)│  │(:3002) │  │(:3003)   │
               │  AI   │  │  AI    │  │  AI      │
+              │did:key│  │did:key │  │did:key   │
               └───────┘  └────────┘  └──────────┘
+
+       ┌──────────────────────────────────────────────┐
+       │      Storacha (Warm — Persistent Storage)    │
+       │   - Encrypted with Lit threshold keys        │
+       │   - UCAN-authorized per-agent access         │
+       │   - Content-addressed (CID)                  │
+       │   - Auto Filecoin deals (Cold archival)      │
+       └──────────────────────────────────────────────┘
+
+       ┌──────────────────────────────────────────────┐
+       │     Zama fhEVM (Confidential Voting)         │
+       │   - FHE-encrypted ballots (euint32)          │
+       │   - Homomorphic tally (no plaintext)         │
+       │   - TEE-only finalization                    │
+       └──────────────────────────────────────────────┘
+
+       ┌──────────────────────────────────────────────┐
+       │     Flow VRF (Verifiable Randomness)         │
+       │   - revertibleRandom from Flow beacon        │
+       │   - Deterministic Fisher-Yates shuffle       │
+       │   - Fair jury selection with proof            │
+       └──────────────────────────────────────────────┘
 ```
 
-### The Flow
+### The Flow (Standard Voting — V1)
 
 1. A user (or dApp) calls `start_coordination(task_config)` on the NEAR contract with a proposal
 2. The contract requires a manifesto to be set, then creates a **yielded promise** (pauses execution)
@@ -83,6 +117,42 @@ The system implements a **privacy-preserving multi-agent voting protocol** with 
 9. **Privacy step**: The Coordinator sends ONLY `{approved, rejected, decision, workerCount, timestamp}` to the contract
 10. The contract validates hashes and resumes its yielded promise with the aggregate
 11. The finalized result is stored on-chain
+12. **Backup step**: Coordinator encrypts the deliberation transcript with Lit Protocol, uploads to Storacha, and archives to Filecoin
+
+### The Flow (Confidential Voting — V2)
+
+For high-stakes proposals (`voting_mode: "confidential"`):
+
+1. Coordinator creates a proposal on `DeliberaVoting.sol` (Zama fhEVM)
+2. Each voter agent (inside Phala TEE) casts an FHE-encrypted ballot via `castVote()`
+3. `FHE.add()` accumulates encrypted votes on-chain — no plaintext visible
+4. After the deadline, the Phala TEE calls `finalize()` and `publishResult()`
+5. The decrypted aggregate is written back to the NEAR coordinator contract
+
+### Jury Selection (Flow VRF)
+
+For proposals requiring a subset of voters:
+
+1. Coordinator calls `POST /api/coordinate/select-jury` with a candidate pool
+2. Flow VRF provides a verifiable random seed via `revertibleRandom<UInt64>()`
+3. Fisher-Yates shuffle (seeded by VRF output) selects the jury
+4. The VRF seed and proof are recorded for auditability
+5. Same seed always produces the same jury (deterministic, verifiable)
+
+---
+
+## Tiered Storage Architecture
+
+| Tier | System | Data | Lifetime | Encryption |
+|------|--------|------|----------|------------|
+| Hot | Ensue Memory Network | Real-time task state, agent working memory | Session | Permissioned access |
+| Warm | Storacha (UCAN-authorized) | Session summaries, encrypted transcripts | Persistent | Lit threshold encryption |
+| Cold | Filecoin (Proof of Spacetime) | Finalized deliberation records | Permanent | Inherited from Storacha |
+
+**Sync rules:**
+- After each deliberation cycle, Ensue tree is serialized and backed up to Storacha
+- Storacha CIDs are archived to Filecoin via IPNI verification + gateway confirmation
+- Archival records are logged to Ensue under `coordination/archival/{proposalId}`
 
 ---
 
@@ -91,7 +161,7 @@ The system implements a **privacy-preserving multi-agent voting protocol** with 
 ### 1. NEAR Smart Contract (Settlement Layer)
 
 **File:** `coordinator-contract/src/lib.rs`
-**Deployed at:** `ac-proxy.agents-coordinator.testnet`
+**Deployed at:** `coordinator.agents-coordinator.testnet`
 
 The contract manages the full proposal lifecycle using NEAR's yield/resume pattern.
 
@@ -148,23 +218,11 @@ Created ──────────────> WorkersCompleted ───�
 
 **What's NOT on-chain:** Which worker voted which way, AI reasoning, processing times, error details. All private data stays in Ensue.
 
-**Security:**
-- Config hash validation — proves the task wasn't tampered with between submission and resolution
-- Result hash validation — proves the aggregate result wasn't altered
-- TEE verification — only registered coordinators with approved codehashes can call `coordinator_resume` and `record_worker_submissions`
-- Nullifier pattern — each worker can only submit once per proposal (prevents double-voting)
-
-### 2. Ensue Shared Memory (Coordination Layer)
+### 2. Ensue Shared Memory (Hot Coordination Layer)
 
 **What it is:** A permissioned, off-chain key-value memory network with a JSON-RPC 2.0 API over Server-Sent Events (SSE).
 
 **Why we use it:** Agents running in TEEs can't directly communicate with each other. Ensue provides a shared memory space where they read/write data asynchronously, coordinated by hierarchical key namespaces.
-
-**API protocol:**
-- All operations are `POST https://api.ensue-network.ai/` with Bearer token auth
-- Request body: JSON-RPC 2.0 with `method: "tools/call"` and tool name in `params.name`
-- Response: SSE (`text/event-stream`) with `data: {jsonrpc payload}`
-- Operations: `create_memory`, `get_memory`, `update_memory`, `delete_memory`, `list_keys`, `search_memories`
 
 **Data layout:**
 
@@ -203,28 +261,9 @@ coordination/
     proposal_id    1
   config/
     task_definition  {"type":"vote","parameters":{"proposal":"Fund grants..."}}
+  archival/
+    {proposalId}   {"cid":"bafy...","dealReference":"fil-...","archivedAt":"..."}
 ```
-
-**Security model:**
-
-Ensue uses a **permissioned access model** with identity-based controls:
-
-- **Private by default** — memories are only accessible to the creating agent unless explicitly shared
-- **Namespace permissions** — access governed by hierarchical key paths with regex patterns
-- **Permission scopes** — `read`, `write`, `update`, `delete`, `share`
-- **TLS in transit** — all communication over HTTPS
-- **Bearer token auth** — API key identifies the agent
-
-**On E2EE:** Ensue does not currently advertise end-to-end encryption as a feature. Data is protected by:
-- TLS encryption in transit (HTTPS)
-- Permissioned access controls at the API layer
-- Private-by-default memory model
-
-For this project, the privacy guarantee is layered:
-1. **Ensue access controls** — agents can only access their own namespaces
-2. **Architectural design** — the coordinator only writes aggregate tallies on-chain, never individual votes
-3. **TEE enforcement** — in production, the coordinator runs in a verified TEE (Phala), so even the operator can't tamper with the aggregation logic
-4. **Nullifier hashes** — on-chain submission hashes prove participation without revealing vote content
 
 **Production permission scoping:**
 
@@ -237,65 +276,99 @@ For this project, the privacy guarantee is layered:
 | Coordinator | write | `coordination/coordinator/*` |
 | Frontend | read | `coordination/*` (display only) |
 
-Workers can only write to their own namespace. The Coordinator can read all worker data but workers cannot read each other. The frontend can only read.
+### 3. Storacha (Warm Persistence Layer)
 
-### 3. Coordinator Agent (Orchestration)
+**What it is:** Decentralized, content-addressed storage with UCAN authorization and automatic Filecoin deals.
+
+**Why we use it:** Ensue is session-scoped hot memory. Storacha provides persistent, encrypted storage for deliberation transcripts, agent preferences, and session summaries that survive across sessions.
+
+**Identity model:** Each agent has a `did:key` identity derived from an Ed25519 private key. UCAN delegations grant capabilities (upload, list, decrypt) scoped per agent role.
+
+**Encryption:** All sensitive data is encrypted with Lit Protocol threshold keys before upload. Access Control Conditions (ACCs) tied to NEAR contract state determine who can decrypt.
+
+**Implementation files:**
+- `coordinator-agent/src/storacha/identity.ts` — Coordinator Storacha client
+- `coordinator-agent/src/storacha/vault.ts` — Encrypt + upload with Lit ACCs
+- `coordinator-agent/src/storacha/ensue-backup.ts` — Serialize Ensue tree to Storacha
+- `worker-agent/src/storacha/identity.ts` — Worker Storacha client
+- `worker-agent/src/storacha/agent-identity.ts` — Agent identity (profiles, decisions)
+
+### 4. Filecoin (Cold Archival Layer)
+
+**What it is:** Permanent storage with cryptographic Proof of Spacetime guarantees.
+
+**Why we use it:** Storacha automatically creates Filecoin deals for all uploaded content. The archiver confirms this pipeline is working and creates verifiable records for the NEAR ledger.
+
+**Flow:**
+1. Confirm CID exists in Storacha space
+2. Query IPNI (cid.contact) to verify content is indexed across Filecoin infrastructure
+3. Verify retrieval via w3s.link gateway
+4. Generate deterministic deal reference (SHA256 of CID + provider IDs)
+5. Log archival record to Ensue
+
+**Implementation:** `coordinator-agent/src/filecoin/archiver.ts`
+
+### 5. Zama fhEVM (Confidential Voting)
+
+**What it is:** Fully Homomorphic Encryption on EVM — allows computation on encrypted data without decryption.
+
+**Contract:** `contracts/voting/DeliberaVoting.sol`
+
+**How it works:**
+- Voters cast ballots as `euint32` (encrypted 32-bit integers): 1 = Approved, 0 = Rejected
+- `FHE.add()` accumulates the encrypted tally on-chain
+- Nobody (not even the contract owner) can see individual votes or the running tally
+- After the deadline, only the authorized TEE address can call `finalize()` + `publishResult()`
+- The TEE decrypts the aggregate locally and publishes the plaintext result
+
+### 6. Flow VRF (Verifiable Randomness)
+
+**What it is:** Verifiable Random Function backed by Flow blockchain's distributed randomness beacon.
+
+**Implementation:** `coordinator-agent/src/vrf/flow-vrf.ts` + `jury-selector.ts`
+
+**How it works:**
+1. Query Flow testnet for `revertibleRandom<UInt64>()` — a VRF-backed random seed
+2. Use the seed to initialize a deterministic LCG PRNG
+3. Fisher-Yates shuffle the candidate pool
+4. Select the first N candidates as the jury
+5. Record the seed and proof for verification
+
+**API endpoint:** `POST /api/coordinate/select-jury`
+
+### 7. Coordinator Agent (Orchestration)
 
 **File:** `coordinator-agent/src/monitor/memory-monitor.ts`
 **Port:** 3000
 
-The coordinator is the orchestration brain. It bridges the NEAR contract and Ensue.
+The coordinator is the orchestration brain. It bridges the NEAR contract and Ensue, and triggers post-vote operations (backup, archival).
 
-**Coordination lifecycle:**
-
+**Post-vote pipeline:**
 ```
-Poll contract (every 5s)
-  └─> Found pending proposal
-        └─> Write task config to Ensue
-        └─> Reset all worker statuses to "pending"
-        └─> Trigger workers via HTTP (local mode)
-        └─> Monitor Ensue for completion (poll every 1s, 30s timeout)
-              └─> All workers completed
-                    └─> Read worker results from Ensue
-                    └─> Record worker submission hashes on-chain (nullifier)
-                    └─> Tally votes: count Approved vs Rejected
-                    └─> Write full tally to Ensue (private)
-                    └─> Resume contract with ONLY aggregate result
-                    └─> Update status to "completed"
+Vote complete
+  └─> Tally + resume contract (on-chain)
+  └─> Encrypt deliberation → upload to Storacha (warm)
+  └─> Archive Storacha CID to Filecoin (cold)
+  └─> Serialize full Ensue tree → Storacha backup
 ```
 
 **Two modes:**
 - `LOCAL_MODE=true` — Skips TEE registration. Coordinator triggers workers via HTTP and calls contract via `near-api-js`. Used for development.
 - Production — Coordinator registers via Shade Agent SDK with DCAP attestation. Contract verifies TEE before accepting results.
 
-**Privacy enforcement:** The coordinator reads full worker results from Ensue (including individual votes and reasoning) but constructs an `onChainResult` that strips all individual data:
+### 8. Voter Agents (AI Deliberation)
 
-```typescript
-const onChainResult = JSON.stringify({
-  aggregatedValue: tally.aggregatedValue,
-  approved: tally.approved,
-  rejected: tally.rejected,
-  decision: tally.decision,
-  workerCount: tally.workerCount,
-  timestamp: tally.timestamp,
-  proposalId,
-});
-```
-
-Individual votes, reasoning, and processing details are written to Ensue only.
-
-### 4. Voter Agents (AI Deliberation)
-
-**Files:** `worker-agent-{1,2,3}/src/workers/task-handler.ts` + `ai-voter.ts`
+**Files:** `worker-agent/src/workers/task-handler.ts` + `ai-voter.ts`
 **Ports:** 3001, 3002, 3003
 
-Each voter agent is an independent AI-powered decision maker.
+Each voter agent is an independent AI-powered decision maker with a sovereign `did:key` identity.
 
 **Vote task flow:**
 
 ```
 Receive task config {type: "vote", parameters: {proposal: "..."}}
   └─> Update Ensue status: "processing"
+  └─> Load agent identity (profile, values, decision history)
   └─> Fetch DAO manifesto from contract (RPC view call)
   └─> Call NEAR AI API:
         Model: deepseek-ai/DeepSeek-V3.1
@@ -304,96 +377,43 @@ Receive task config {type: "vote", parameters: {proposal: "..."}}
         Tool: dao_vote({vote, reasoning})
   └─> Parse structured response: {vote: "Approved", reasoning: "..."}
   └─> Write result to Ensue: {workerId, vote, reasoning, processingTime}
+  └─> Record decision to local history
   └─> Update Ensue status: "completed"
 ```
-
-**NEAR AI integration (`ai-voter.ts`):**
-- Uses OpenAI-compatible API at `https://cloud-api.near.ai/v1`
-- Model: `deepseek-ai/DeepSeek-V3.1` with function calling
-- Forces structured output via `tool_choice: {type: "function", function: {name: "dao_vote"}}`
-- Returns `{vote: "Approved"|"Rejected", reasoning: string}`
-
-**Legacy task types** (kept for testing):
-- `random` — Generate a random number 0-99
-- `count` — Return a configured count value
-- `multiply` — Multiply two parameters
-
-### 5. Frontend Dashboard
-
-**File:** `frontend/src/app/page.tsx`
-**Port:** 3004
-
-A Next.js application that provides real-time monitoring of the voting flow.
-
-**Features:**
-- Live status indicators for coordinator + all 3 voter agents (polls every 2s)
-- Voting flow visualization with active step highlighting
-- Contract state panel (reads proposals directly from NEAR RPC)
-- Coordinator panel for triggering proposals
-- Event log with color-coded status transitions
-- Memory reset button for testing
 
 ---
 
 ## Privacy Model
 
-### The Problem
-
-In many multi-agent systems, all agent outputs are visible on-chain. This is problematic when:
-- Individual votes should remain secret (ballot privacy)
-- Worker computations contain sensitive reasoning
-- Visible votes enable strategic voting (adjusting your vote after seeing others)
-
-### Our Solution: Off-Chain Deliberation, On-Chain Settlement
+### Off-Chain Deliberation, On-Chain Settlement
 
 ```
-PRIVATE (Ensue only)                PUBLIC (NEAR blockchain)
-================================    ================================
-Worker 1: Approved                  Approved: 2
-  "Aligns with manifesto            Rejected: 1
-   section 3 on education..."       Decision: Approved
-Worker 2: Rejected                  Worker count: 3
-  "Budget exceeds our               Config hash (integrity)
-   fiscal guidelines..."            Result hash (integrity)
-Worker 3: Approved                  Worker submission hashes (nullifier)
+PRIVATE (Ensue + Storacha)              PUBLIC (NEAR blockchain)
+====================================    ================================
+Worker 1: Approved                      Approved: 2
+  "Aligns with manifesto                Rejected: 1
+   section 3 on education..."           Decision: Approved
+Worker 2: Rejected                      Worker count: 3
+  "Budget exceeds our                   Config hash (integrity)
+   fiscal guidelines..."                Result hash (integrity)
+Worker 3: Approved                      Worker submission hashes (nullifier)
   "Community impact justifies
    the investment..."
 Processing times
 Error details
-Intermediate statuses
+Encrypted transcripts (Storacha)
+Filecoin archival records
 ```
 
 ### How Privacy Is Maintained
 
-1. **Worker isolation** — Each voter writes ONLY to its own Ensue namespace (`coordination/tasks/workerN/`). Voters cannot read each other's results.
-
-2. **Coordinator aggregation** — The Coordinator reads all voter results from Ensue, counts Approved vs Rejected, and constructs an aggregate. Individual votes and reasoning are discarded before writing to the contract.
-
-3. **On-chain data** — The contract stores `{approved, rejected, decision, workerCount, timestamp, proposalId}`. There is no way to determine individual worker votes from this.
-
-4. **Nullifier pattern** — Worker submission hashes are recorded on-chain to prevent double-voting. The hash proves a worker participated and committed to a specific result, without revealing what that result was.
-
-5. **Hash integrity** — `config_hash` proves the task wasn't tampered with. `result_hash` proves the aggregate wasn't altered. Both are verified on-chain without revealing underlying data.
-
-6. **TEE enforcement (production)** — The Coordinator runs in a Phala Network TEE with verified code. The contract checks the DCAP attestation before accepting results, ensuring only approved code performs the aggregation.
-
-### Ensue Security Considerations
-
-Ensue's current security model provides:
-- **TLS encryption in transit** — All API communication is HTTPS
-- **Private-by-default memories** — Data only accessible to the creating agent
-- **Namespace access controls** — Permissions scoped to key path patterns
-- **Bearer token authentication** — API keys identify agents
-
-**E2EE is not currently a feature** of Ensue. This means:
-- Ensue (the service operator) could theoretically access stored data
-- Privacy relies on access controls + architectural design (not cryptographic guarantees)
-- For stronger privacy guarantees, future work could encrypt vote data client-side before writing to Ensue
-
-For the current use case, the practical privacy guarantee is strong:
-- Even if Ensue data were exposed, the on-chain record only shows aggregates
-- The TEE ensures the coordinator code faithfully aggregates without leaking individual votes
-- The nullifier prevents any agent from voting twice
+1. **Worker isolation** — Each voter writes ONLY to its own Ensue namespace. Voters cannot read each other's results.
+2. **Coordinator aggregation** — Individual votes and reasoning are discarded before writing to the contract.
+3. **On-chain data** — `{approved, rejected, decision, workerCount}` only. No individual votes derivable.
+4. **Nullifier pattern** — Worker submission hashes prevent double-voting without revealing vote content.
+5. **Threshold encryption** — Lit Protocol threshold keys encrypt data before Storacha upload. ACCs enforce access.
+6. **TEE enforcement (production)** — Coordinator runs in Phala TEE with verified code.
+7. **FHE voting (V2)** — For confidential proposals, even the encrypted tally is invisible until TEE finalization.
 
 ---
 
@@ -402,31 +422,19 @@ For the current use case, the practical privacy guarantee is strong:
 | Component | Technology | Purpose |
 |-----------|-----------|---------|
 | Smart Contract | Rust + near-sdk 5.7.0 | On-chain settlement with yield/resume |
+| Registry Contract | Rust + near-sdk 5.17.2 | Platform-wide agent directory |
 | AI Model | DeepSeek-V3.1 via NEAR AI | Proposal deliberation and structured voting |
+| AI Verification | NEAR AI Signature + Attestation | Cryptographic proof of model identity |
 | Agents | TypeScript + Hono 4.8 | HTTP servers for coordination and voting |
-| Shared Memory | Ensue Memory Network | Off-chain agent coordination (JSON-RPC 2.0/SSE) |
+| Hot Memory | Ensue Memory Network | Off-chain agent coordination (JSON-RPC 2.0/SSE) |
+| Warm Storage | Storacha + Lit Protocol | Encrypted persistent storage with UCAN auth |
+| Cold Archival | Filecoin (via Storacha) | Permanent storage with Proof of Spacetime |
+| Confidential Voting | Zama fhEVM | FHE-encrypted ballots and homomorphic tally |
+| Verifiable Randomness | Flow VRF | Fair jury selection with cryptographic proof |
+| Agent Identity | did:key + UCAN delegation | Sovereign agent identity per worker |
 | TEE Runtime | Phala Network + Shade Agent SDK | Trusted execution environment |
-| Frontend | Next.js 15 + React 19 | Real-time monitoring dashboard |
-| Build | cargo-near + wasm-opt | WASM compilation for NEAR |
-
-## Local Development
-
-```bash
-# Start all agents (local mode, no TEE/contract needed)
-./scripts/start-all.sh
-
-# Test the full voting flow
-./scripts/test-flow.sh
-
-# Or manually trigger a vote:
-curl -X POST http://localhost:3000/api/coordinate/trigger \
-  -H 'Content-Type: application/json' \
-  -d '{"taskConfig":"{\"type\":\"vote\",\"parameters\":{\"proposal\":\"Fund a developer education program\"}}"}'
-
-# Check results
-curl http://localhost:3000/api/coordinate/status
-curl http://localhost:3000/api/coordinate/workers
-```
+| Payments | PingPay (USDC on NEAR) | Agent deployment checkout |
+| Frontend | Next.js 15 + React 19 | Dashboard, deploy UI, on-chain viewer |
 
 ## File Map
 
@@ -434,39 +442,60 @@ curl http://localhost:3000/api/coordinate/workers
 near-shade-coordination/
   coordinator-contract/       # NEAR smart contract (Rust)
     src/lib.rs                # Yield/resume, manifesto, proposal lifecycle, nullifier
-    Cargo.toml                # near-sdk 5.7.0, sha2, hex, serde_json
-    target/near/*.wasm        # Compiled WASM binary
+
+  registry-contract/          # Agent registry contract (Rust)
+    src/lib.rs                # Multi-coordinator/worker registry with endpoint URLs
 
   coordinator-agent/          # Orchestrator agent (TypeScript)
     src/index.ts              # Entry point, local/production mode switch
     src/monitor/
-      memory-monitor.ts       # Core: Ensue polling, vote tally, contract resume
+      memory-monitor.ts       # Core: Ensue polling, vote tally, contract resume, backup, archival
     src/contract/
       resume-handler.ts       # Shade Agent SDK contract calls
       local-contract.ts       # near-api-js calls for local mode
+    src/storacha/
+      identity.ts             # Storacha client (did:key + UCAN)
+      vault.ts                # Encrypt + upload with Lit ACCs
+      ensue-backup.ts         # Serialize Ensue tree to Storacha
+    src/filecoin/
+      archiver.ts             # IPNI verification + Filecoin archival records
+    src/vrf/
+      flow-vrf.ts             # Flow VRF seed + Fisher-Yates shuffle
+      jury-selector.ts        # Coordinator wrapper for jury selection
     src/routes/
-      coordinate.ts           # HTTP API: trigger, status, workers, reset
+      coordinate.ts           # HTTP API: trigger, status, workers, reset, select-jury
 
-  worker-agent-{1,2,3}/      # AI voter agents (TypeScript)
+  worker-agent/               # AI voter agent (TypeScript, runs as 3 instances)
     src/index.ts              # Entry point (Hono server)
     src/workers/
-      task-handler.ts         # Task execution, Ensue status tracking
+      task-handler.ts         # Task execution, Ensue status tracking, polling loop
       ai-voter.ts             # NEAR AI integration (DeepSeek-V3.1)
+    src/storacha/
+      identity.ts             # Storacha client (did:key + UCAN)
+      agent-identity.ts       # Agent profile, preferences, decision history
     src/routes/
       task.ts                 # HTTP API: execute, status, health
+      knowledge.ts            # HTTP API: identity, health
 
-  shared/                     # Shared library
+  contracts/voting/           # Zama fhEVM blind voting contract
+    contracts/
+      DeliberaVoting.sol      # FHE voting: castVote, finalize, publishResult
+    test/
+      DeliberaVoting.ts       # Hardhat tests (10 passing)
+
+  shared/                     # Shared TypeScript library
     src/ensue-client.ts       # Ensue JSON-RPC client (SSE parsing)
     src/constants.ts          # Memory key paths, worker IDs
-    src/types.ts              # TypeScript interfaces (VoteResult, TallyResult, etc.)
+    src/types.ts              # TypeScript interfaces
 
   frontend/                   # Next.js 15 monitoring dashboard
     src/app/page.tsx          # Main dashboard layout
-    src/app/components/       # CoordinatorPanel, WorkerCard, ContractStatePanel, EventLog
-    src/lib/api.ts            # Backend API client
-    src/lib/use-polling.ts    # React polling hook
+    src/app/components/       # CoordinatorPanel, WorkerCard, ContractStatePanel
 
-  scripts/                    # Development scripts
-    start-all.sh              # Start all services
-    test-flow.sh              # End-to-end test
+  .claude/skills/             # Claude Code skills
+    storacha-vault/           # Encrypt + upload to Storacha
+    zama-blind-voting/        # Scaffold fhEVM voting contracts
+    filecoin-archive/         # Archive CIDs to Filecoin
+    flow-vrf/                 # Flow VRF jury selection
+    ensue-backup/             # Serialize Ensue tree to Storacha
 ```

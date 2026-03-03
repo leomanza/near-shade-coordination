@@ -1,0 +1,49 @@
+{
+  "name": "@near-shade-coordination/fhe-voting",
+  "description": "Delibera FHE blind voting contract using Zama fhEVM",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@fhevm/mock-utils": "^0.4.2",
+    "@fhevm/solidity": "^0.11.1",
+    "encrypted-types": "^0.0.4"
+  },
+  "devDependencies": {
+    "@fhevm/hardhat-plugin": "^0.4.2",
+    "@nomicfoundation/hardhat-chai-matchers": "^2.1.0",
+    "@nomicfoundation/hardhat-ethers": "^3.1.3",
+    "@nomicfoundation/hardhat-verify": "^2.1.3",
+    "@typechain/ethers-v6": "^0.5.1",
+    "@typechain/hardhat": "^9.1.0",
+    "@types/chai": "^4.3.20",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^20.19.30",
+    "chai": "^4.5.0",
+    "cross-env": "^7.0.3",
+    "ethers": "^6.16.0",
+    "hardhat": "^2.28.4",
+    "hardhat-deploy": "^0.11.45",
+    "hardhat-gas-reporter": "^2.3.0",
+    "solidity-coverage": "^0.8.17",
+    "ts-node": "^10.9.2",
+    "typechain": "^8.3.2",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "compile": "cross-env TS_NODE_TRANSPILE_ONLY=true hardhat compile",
+    "test": "hardhat test",
+    "clean": "rimraf ./artifacts ./cache ./types",
+    "typechain": "cross-env TS_NODE_TRANSPILE_ONLY=true hardhat typechain"
+  },
+  "overrides": {
+    "elliptic@>=4.0.0 <=6.5.6": ">=6.5.7",
+    "elliptic@<6.6.0": ">=6.6.0",
+    "undici@>=6.0.0 <6.21.1": ">=6.21.1 <7.0.0",
+    "axios@>=1.0.0 <1.8.2": ">=1.8.2",
+    "minimatch": "^3.1.2"
+  }
+}

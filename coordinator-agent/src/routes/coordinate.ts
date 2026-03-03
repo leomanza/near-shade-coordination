@@ -9,6 +9,7 @@ import {
   PROPOSAL_INDEX_KEY,
 } from '@near-shade-coordination/shared';
 import { triggerLocalCoordination } from '../monitor/memory-monitor';
+import { selectJury, verifyJurySelection } from '../vrf/jury-selector';
 import {
   localGetRegisteredWorkers,
 } from '../contract/local-contract';
@@ -168,16 +169,20 @@ app.post('/trigger', async (c) => {
     const body = await c.req.json();
     const taskConfig = body.taskConfig || { type: 'random', timeout: 3000 };
 
-    console.log('Manual coordination trigger received:', taskConfig);
+    // Normalize: triggerLocalCoordination expects a JSON string.
+    // taskConfig may arrive as a string (curl) or an object (frontend).
+    const taskConfigStr = typeof taskConfig === 'string' ? taskConfig : JSON.stringify(taskConfig);
+
+    console.log('Manual coordination trigger received:', taskConfigStr);
 
     // Run coordination in background (don't block response)
-    triggerLocalCoordination(JSON.stringify(taskConfig)).catch((err) => {
+    triggerLocalCoordination(taskConfigStr).catch((err) => {
       console.error('Local coordination failed:', err);
     });
 
     return c.json({
       message: 'Coordination triggered',
-      taskConfig,
+      taskConfig: taskConfigStr,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -317,6 +322,86 @@ app.get('/proposals/:id', async (c) => {
     console.error('Error getting proposal details:', error);
     return c.json(
       { error: 'Failed to get proposal details', details: error instanceof Error ? error.message : 'Unknown' },
+      500
+    );
+  }
+});
+
+/**
+ * POST /api/coordinate/select-jury
+ * Select a jury from a candidate pool using Flow VRF.
+ *
+ * Body: {
+ *   pool: string[],          // Candidate NEAR AccountIDs
+ *   jurySize: number,        // Number of jurors to select
+ *   deliberationId?: string  // Optional context ID
+ * }
+ */
+app.post('/select-jury', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { pool, jurySize, deliberationId } = body;
+
+    if (!pool || !Array.isArray(pool) || pool.length === 0) {
+      return c.json({ error: 'pool must be a non-empty array of candidate IDs' }, 400);
+    }
+
+    const size = jurySize || 3;
+    if (size > pool.length) {
+      return c.json({ error: `jurySize (${size}) exceeds pool size (${pool.length})` }, 400);
+    }
+
+    console.log(`[select-jury] Selecting ${size} jurors from pool of ${pool.length}`);
+
+    const result = await selectJury(pool, size, deliberationId);
+
+    return c.json(result);
+  } catch (error) {
+    console.error('Error selecting jury:', error);
+    return c.json(
+      {
+        error: 'Failed to select jury',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      },
+      500
+    );
+  }
+});
+
+/**
+ * POST /api/coordinate/verify-jury
+ * Verify a jury selection is deterministic given the same seed.
+ *
+ * Body: {
+ *   pool: string[],    // Original candidate pool
+ *   jurySize: number,  // Original jury size
+ *   vrfSeed: string    // The VRF seed to verify with
+ * }
+ */
+app.post('/verify-jury', async (c) => {
+  try {
+    const body = await c.req.json();
+    const { pool, jurySize, vrfSeed } = body;
+
+    if (!pool || !Array.isArray(pool) || !vrfSeed) {
+      return c.json({ error: 'pool and vrfSeed are required' }, 400);
+    }
+
+    const jury = verifyJurySelection(pool, jurySize || 3, vrfSeed);
+
+    return c.json({
+      jury,
+      vrfSeed,
+      verified: true,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('Error verifying jury:', error);
+    return c.json(
+      {
+        error: 'Failed to verify jury',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      },
       500
     );
   }

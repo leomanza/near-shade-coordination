@@ -8,7 +8,7 @@ import {
   loadIdentity,
   formatIdentityContext,
   recordDecision,
-} from '../nova/agent-identity';
+} from '../storacha/agent-identity';
 
 // Lazy-initialize Ensue client (env vars loaded by dotenv before first use)
 let _ensueClient: EnsueClient | null = null;
@@ -157,15 +157,15 @@ async function performWork(config: TaskConfig): Promise<WorkResult> {
       if (!manifesto) throw new Error('Could not fetch manifesto from contract');
       console.log(`[${WORKER_ID}] Manifesto hash: ${manifesto.hash}`);
 
-      // Load persistent agent identity from Nova
+      // Load persistent agent identity
       let agentContext: string | undefined;
       try {
-        console.log(`[${WORKER_ID}] Loading agent identity from Nova...`);
+        console.log(`[${WORKER_ID}] Loading agent identity...`);
         const identity = await loadIdentity();
         agentContext = formatIdentityContext(identity);
         console.log(`[${WORKER_ID}] Agent identity loaded (${identity.recentDecisions.length} past decisions)`);
       } catch (e) {
-        console.warn(`[${WORKER_ID}] Nova identity unavailable, proceeding without:`, e);
+        console.warn(`[${WORKER_ID}] Agent identity unavailable, proceeding without:`, e);
       }
 
       console.log(`[${WORKER_ID}] Calling AI for vote on proposal...`);
@@ -177,14 +177,18 @@ async function performWork(config: TaskConfig): Promise<WorkResult> {
         console.log(`[${WORKER_ID}] Verification proof obtained (chat_id: ${voteResult.verificationProof.chat_id})`);
       }
 
-      // Record decision to Nova for persistent history
+      // Record decision for persistent history (Ensue + Storacha backup)
       try {
         const proposalId = config.parameters?.proposalId as string
           || `proposal-${Date.now()}`;
-        await recordDecision(proposalId, proposal, voteResult.vote, voteResult.reasoning);
-        console.log(`[${WORKER_ID}] Decision recorded to Nova`);
+        const cid = await recordDecision(proposalId, proposal, voteResult.vote, voteResult.reasoning);
+        if (cid) {
+          console.log(`[${WORKER_ID}] Decision persisted to Storacha: ${cid}`);
+        } else {
+          console.log(`[${WORKER_ID}] Decision recorded (local/Ensue)`);
+        }
       } catch (e) {
-        console.warn(`[${WORKER_ID}] Failed to record decision to Nova:`, e);
+        console.warn(`[${WORKER_ID}] Failed to record decision:`, e);
       }
 
       return {
@@ -252,14 +256,10 @@ export async function initializeWorker(): Promise<void> {
     // Clear any previous error
     await getEnsueClient().deleteMemory(workerKeys.ERROR);
 
-    // Initialize Nova persistent identity (non-blocking)
-    if (process.env.NOVA_API_KEY) {
-      initializeIdentity()
-        .then(() => console.log(`[${WORKER_ID}] Nova identity initialized`))
-        .catch(e => console.warn(`[${WORKER_ID}] Nova identity init failed (non-critical):`, e));
-    } else {
-      console.log(`[${WORKER_ID}] NOVA_API_KEY not set, skipping Nova identity`);
-    }
+    // Initialize agent identity (non-blocking)
+    initializeIdentity()
+      .then(() => console.log(`[${WORKER_ID}] Agent identity initialized`))
+      .catch(e => console.warn(`[${WORKER_ID}] Agent identity init failed (non-critical):`, e));
 
     console.log(`[${WORKER_ID}] Worker initialized successfully`);
   } catch (error) {
@@ -291,7 +291,11 @@ export function startWorkerPollingLoop(): void {
         return;
       }
 
-      const taskConfig: TaskConfig = JSON.parse(taskConfigStr);
+      // Parse task config — handle double-stringified values defensively
+      let taskConfig: TaskConfig = JSON.parse(taskConfigStr);
+      if (typeof taskConfig === 'string') {
+        taskConfig = JSON.parse(taskConfig);
+      }
       console.log(`[${WORKER_ID}] Detected pending task in Ensue, auto-executing...`);
 
       isExecuting = true;

@@ -32,7 +32,7 @@ export default function WorkerCard({ workerId, label, port, status, onLog }: Wor
 
   const agentName = identity?.manifesto?.name;
   const agentRole = identity?.manifesto?.role;
-  const hasNova = !!identity;
+  const hasStoracha = !!identity;
 
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 overflow-hidden">
@@ -51,9 +51,9 @@ export default function WorkerCard({ workerId, label, port, status, onLog }: Wor
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {hasNova && (
+            {hasStoracha && (
               <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-[#00ff41]/10 text-[#00ff41]/60 border border-[#00ff41]/20 font-mono">
-                NOVA
+                STORACHA
               </span>
             )}
             <span className="text-xs font-mono px-2 py-1 rounded-md bg-zinc-800 text-zinc-400">
@@ -98,12 +98,12 @@ export default function WorkerCard({ workerId, label, port, status, onLog }: Wor
         <div className="border-t border-zinc-800 p-4 space-y-3 bg-zinc-950/50">
           {!identity ? (
             <p className="text-[10px] text-zinc-600 font-mono">
-              Nova identity not available. Agent may not have NOVA_API_KEY configured.
+              Storacha identity not available. Agent may not have STORACHA_AGENT_PRIVATE_KEY configured.
             </p>
           ) : (
             <>
               {/* Manifesto */}
-              <IdentitySection title="MANIFESTO" badge="NOVA">
+              <IdentitySection title="MANIFESTO" badge="STORACHA">
                 <p className="text-[10px] text-zinc-400 leading-relaxed">
                   {identity.manifesto.guidelines}
                 </p>
@@ -270,12 +270,12 @@ function FeedKnowledgeForm({
       const noteList = notes.split("\n").map((n) => n.trim()).filter(Boolean);
       const result = await feedKnowledge(workerId, noteList);
       if (result) {
-        onDone(`[nova] Knowledge fed to ${workerId}: ${noteList.length} notes`);
+        onDone(`[storacha] Knowledge fed to ${workerId}: ${noteList.length} notes`);
       } else {
-        onError(`[nova] Failed to feed knowledge to ${workerId}`);
+        onError(`[storacha] Failed to feed knowledge to ${workerId}`);
       }
     } catch {
-      onError(`[nova] Error feeding knowledge to ${workerId}`);
+      onError(`[storacha] Error feeding knowledge to ${workerId}`);
     } finally {
       setSubmitting(false);
     }
@@ -333,12 +333,12 @@ function EditManifestoForm({
         values: valList,
       });
       if (result) {
-        onDone(`[nova] Manifesto updated for ${workerId}`);
+        onDone(`[storacha] Manifesto updated for ${workerId}`);
       } else {
-        onError(`[nova] Failed to update manifesto for ${workerId}`);
+        onError(`[storacha] Failed to update manifesto for ${workerId}`);
       }
     } catch {
-      onError(`[nova] Error updating manifesto for ${workerId}`);
+      onError(`[storacha] Error updating manifesto for ${workerId}`);
     } finally {
       setSubmitting(false);
     }
@@ -347,7 +347,7 @@ function EditManifestoForm({
   return (
     <div className="space-y-2 p-3 rounded bg-zinc-900/80 border border-zinc-800">
       <p className="text-[9px] text-zinc-600 font-mono">
-        // Edit this agent&apos;s identity. Changes persist in Nova encrypted storage.
+        // Edit this agent&apos;s identity. Changes persist in Storacha with Lit encryption.
       </p>
       <div className="grid grid-cols-2 gap-2">
         <input

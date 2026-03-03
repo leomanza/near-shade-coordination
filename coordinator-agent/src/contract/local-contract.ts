@@ -107,35 +107,35 @@ export async function localViewCall<T>(methodName: string, args: Record<string, 
 export async function localStartCoordination(taskConfig: string): Promise<number | null> {
   const beforeId = await localViewCall<number>('get_current_proposal_id', {}) ?? 0;
 
-  try {
-    // start_coordination uses yield/resume — the tx creates the proposal immediately
-    // but then waits ~200 blocks for coordinator_resume to call back. We DON'T want
-    // to wait for that; just fire the tx and race with a short timeout.
-    await Promise.race([
-      contractCall('start_coordination', { task_config: taskConfig }),
-      new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout (expected for yield/resume)')), 15000)),
-    ]);
-  } catch (error: any) {
-    const msg = error.message || '';
+  // Fire the start_coordination tx in the background — don't await it.
+  // The tx creates the proposal via promise_yield_create (synchronous part),
+  // then blocks waiting for coordinator_resume (the yield). We only need the
+  // proposal to exist, not the yield to resolve.
+  contractCall('start_coordination', { task_config: taskConfig }).catch(err => {
+    const msg = err?.message || '';
     if (msg.includes('timeout') || msg.includes('ETIMEDOUT') || msg.includes('Timeout') || msg.includes('yield')) {
-      console.warn('[CONTRACT] start_coordination timed out (expected for yield/resume), checking if tx succeeded...');
+      // Expected: tx blocks on yield then times out — ignore
     } else {
-      console.error('[CONTRACT] start_coordination failed:', msg.substring(0, 300));
-      // Still check if proposal was created despite the error
+      console.warn('[CONTRACT] start_coordination background error:', msg.substring(0, 200));
+    }
+  });
+
+  // Poll for the proposal ID to increment (means tx landed and proposal was created).
+  // Testnet blocks are ~0.5s, so check every 500ms for up to 8s.
+  const POLL_MS = 500;
+  const MAX_WAIT = 8000;
+  const start = Date.now();
+
+  while (Date.now() - start < MAX_WAIT) {
+    await new Promise(r => setTimeout(r, POLL_MS));
+    const afterId = await localViewCall<number>('get_current_proposal_id', {}) ?? 0;
+    if (afterId > beforeId) {
+      console.log(`[CONTRACT] start_coordination succeeded, proposal #${afterId} (detected in ${Date.now() - start}ms)`);
+      return afterId;
     }
   }
 
-  // Wait for finalization
-  await new Promise(r => setTimeout(r, 5000));
-
-  // Check if proposal ID incremented
-  const afterId = await localViewCall<number>('get_current_proposal_id', {}) ?? 0;
-  if (afterId > beforeId) {
-    console.log(`[CONTRACT] start_coordination succeeded, proposal #${afterId}`);
-    return afterId;
-  }
-
-  console.error('[CONTRACT] start_coordination did not create a new proposal');
+  console.error('[CONTRACT] start_coordination did not create a new proposal within 8s');
   return null;
 }
 

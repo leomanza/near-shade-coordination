@@ -115,7 +115,7 @@ export default function BuyPage() {
         )}
 
         <footer className="mt-8 text-center text-[10px] text-zinc-700 font-mono">
-          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Nova SDK
+          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Storacha
         </footer>
       </div>
     </div>
@@ -353,9 +353,9 @@ function WorkerForm({ accountId }: { accountId: string }) {
   const [name, setName] = useState("");
   const [ensueApiKey, setEnsueApiKey] = useState("");
   const [ensueToken, setEnsueToken] = useState("");
-  const [novaApiKey, setNovaApiKey] = useState("");
-  const [novaAccountId, setNovaAccountId] = useState("");
-  const [novaGroupId, setNovaGroupId] = useState("");
+  const [storachaKey, setStorachaKey] = useState("");
+  const [storachaDelegation, setStorachaDelegation] = useState("");
+  const [storachaSpaceDid, setStorachaSpaceDid] = useState("");
   const [nearAiApiKey, setNearAiApiKey] = useState("");
   const [phalaApiKey, setPhalaApiKey] = useState("");
   const [coordinatorId, setCoordinatorId] = useState<string>("");
@@ -382,9 +382,9 @@ function WorkerForm({ accountId }: { accountId: string }) {
           if (s.name) setName(s.name);
           if (s.ensueApiKey) setEnsueApiKey(s.ensueApiKey);
           if (s.ensueToken) setEnsueToken(s.ensueToken);
-          if (s.novaApiKey) setNovaApiKey(s.novaApiKey);
-          if (s.novaAccountId) setNovaAccountId(s.novaAccountId);
-          if (s.novaGroupId) setNovaGroupId(s.novaGroupId);
+          if (s.storachaKey) setStorachaKey(s.storachaKey);
+          if (s.storachaDelegation) setStorachaDelegation(s.storachaDelegation);
+          if (s.storachaSpaceDid) setStorachaSpaceDid(s.storachaSpaceDid);
           if (s.nearAiApiKey) setNearAiApiKey(s.nearAiApiKey);
           if (s.phalaApiKey) setPhalaApiKey(s.phalaApiKey);
           if (s.coordinatorId) setCoordinatorId(s.coordinatorId);
@@ -405,9 +405,9 @@ function WorkerForm({ accountId }: { accountId: string }) {
       ensueApiKey,
       ensueToken,
       nearAiApiKey,
-      novaApiKey,
-      novaAccountId,
-      novaGroupId: novaGroupId || undefined,
+      storachaAgentPrivateKey: storachaKey || undefined,
+      storachaDelegationProof: storachaDelegation || undefined,
+      storachaSpaceDid: storachaSpaceDid || undefined,
       coordinatorId: coordinatorId || undefined,
     });
     setResult(res);
@@ -442,10 +442,10 @@ function WorkerForm({ accountId }: { accountId: string }) {
   useEffect(() => {
     if (!paymentDone && name) {
       sessionStorage.setItem(WORKER_STORAGE_KEY, JSON.stringify({
-        name, ensueApiKey, ensueToken, novaApiKey, novaAccountId, novaGroupId, nearAiApiKey, phalaApiKey, coordinatorId,
+        name, ensueApiKey, ensueToken, storachaKey, storachaDelegation, storachaSpaceDid, nearAiApiKey, phalaApiKey, coordinatorId,
       }));
     }
-  }, [name, ensueApiKey, ensueToken, novaApiKey, novaAccountId, novaGroupId, nearAiApiKey, phalaApiKey, coordinatorId, paymentDone]);
+  }, [name, ensueApiKey, ensueToken, storachaKey, storachaDelegation, storachaSpaceDid, nearAiApiKey, phalaApiKey, coordinatorId, paymentDone]);
 
   const canDeploy = name.length >= 2 && ensueApiKey && nearAiApiKey;
 
@@ -455,7 +455,7 @@ function WorkerForm({ accountId }: { accountId: string }) {
         // Deploy Worker Agent
       </h3>
       <p className="text-[10px] text-zinc-600 mb-6">
-        A worker agent deliberates on proposals using AI, maintains persistent identity via Nova, and votes privately.
+        A worker agent deliberates on proposals using AI, maintains persistent identity via Storacha, and votes privately.
       </p>
 
       <div className="space-y-4">
@@ -481,8 +481,8 @@ function WorkerForm({ accountId }: { accountId: string }) {
           </select>
         </div>
 
-        {/* Optional: Reuse existing Nova Group */}
-        <Field label="Nova Group ID (optional — reuse existing group)" value={novaGroupId} onChange={setNovaGroupId} placeholder="delibera-worker-alice-1234567890" />
+        {/* Optional: Storacha Space DID */}
+        <Field label="Storacha Space DID (optional — shared space for agent memory)" value={storachaSpaceDid} onChange={setStorachaSpaceDid} placeholder="did:key:z6Mk..." />
 
         <div className="border-t border-zinc-800 pt-4">
           <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-3">
@@ -492,8 +492,8 @@ function WorkerForm({ accountId }: { accountId: string }) {
             <Field label="Ensue API Key" value={ensueApiKey} onChange={setEnsueApiKey} placeholder="lmn_..." type="password" />
             <Field label="Ensue Token" value={ensueToken} onChange={setEnsueToken} placeholder="(same as API key if applicable)" type="password" />
             <Field label="NEAR AI API Key" value={nearAiApiKey} onChange={setNearAiApiKey} placeholder="sk-..." type="password" />
-            <Field label="Nova API Key (optional)" value={novaApiKey} onChange={setNovaApiKey} placeholder="nova_sk_..." type="password" />
-            <Field label="Nova Account ID (optional)" value={novaAccountId} onChange={setNovaAccountId} placeholder="your-account.near" />
+            <Field label="Storacha Agent Private Key (optional)" value={storachaKey} onChange={setStorachaKey} placeholder="MgCZ..." type="password" />
+            <Field label="Storacha Delegation Proof (optional)" value={storachaDelegation} onChange={setStorachaDelegation} placeholder="mAYIEA..." type="password" />
             <Field label="Phala Cloud API Key (optional — skip for local)" value={phalaApiKey} onChange={setPhalaApiKey} placeholder="sk-..." type="password" />
           </div>
         </div>

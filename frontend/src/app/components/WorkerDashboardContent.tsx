@@ -197,7 +197,7 @@ function PageShell({
         {children}
 
         <footer className="mt-8 text-center text-[10px] text-zinc-700 font-mono">
-          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Nova SDK
+          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Storacha
         </footer>
       </div>
     </div>

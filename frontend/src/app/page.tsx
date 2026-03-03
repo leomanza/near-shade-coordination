@@ -339,10 +339,10 @@ function Architecture() {
 │  - task coordination & status                   │
 │  - real-time inter-agent communication          │
 ├─────────────────────────────────────────────────┤
-│  NOVA SDK (encrypted persistence)               │
+│  STORACHA + LIT (encrypted persistence)          │
 │  - long-term agent knowledge & preferences      │
 │  - accumulated manifesto/policy documents       │
-│  - cross-session identity continuity            │
+│  - cross-session identity continuity (did:key)  │
 └─────────────────────────────────────────────────┘`}
         </pre>
       </div>
@@ -358,7 +358,7 @@ function TechStack() {
     { name: "NEAR AI", role: "AI model inference (DeepSeek V3.1)" },
     { name: "Phala Network", role: "TEE execution & verifiable compute" },
     { name: "Ensue Network", role: "Encrypted shared memory layer" },
-    { name: "Nova SDK", role: "Encrypted persistent agent storage" },
+    { name: "Storacha", role: "Decentralized persistent agent storage" },
     { name: "PingPay", role: "Crypto payments & checkout" },
   ];
 
@@ -433,7 +433,7 @@ function CTAFooter() {
       </div>
 
       <p className="text-[10px] text-zinc-700 font-mono">
-        NEAR Protocol &middot; NEAR AI &middot; Phala TEE &middot; Ensue Network &middot; Nova SDK &middot; PingPay
+        NEAR Protocol &middot; NEAR AI &middot; Phala TEE &middot; Ensue Network &middot; Storacha &middot; PingPay
       </p>
     </footer>
   );

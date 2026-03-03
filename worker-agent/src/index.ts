@@ -38,14 +38,14 @@ app.get('/', (c) =>
 // Task routes
 app.route('/api/task', taskRoute);
 
-// Knowledge/identity routes (Nova-backed persistent memory)
+// Knowledge/identity routes (Storacha-backed persistent identity)
 app.route('/api/knowledge', knowledgeRoute);
 
 // Start server
 const port = Number(process.env.PORT || '3001');
 console.log(`Worker Agent (${WORKER_ID}) starting on port ${port}...`);
 console.log(`Ensue API configured: ${process.env.ENSUE_API_KEY ? 'YES' : 'NO'}`);
-console.log(`Nova SDK configured: ${process.env.NOVA_API_KEY ? 'YES' : 'NO'}`);
+console.log(`Storacha configured: ${process.env.STORACHA_AGENT_PRIVATE_KEY ? 'YES' : 'NO'}`);
 
 serve({ fetch: app.fetch, port }, async (info) => {
   console.log(`Worker Agent (${WORKER_ID}) running at http://localhost:${info.port}`);

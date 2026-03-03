@@ -93,7 +93,7 @@ export default function CoordinatorPanel({ status, online }: CoordinatorPanelPro
               </span>
             </div>
             <p className="text-[10px] text-zinc-600">
-              Individual votes &amp; reasoning are private (Ensue/Nova). Only the aggregate tally is shown.
+              Individual votes &amp; reasoning are private (Ensue/Storacha). Only the aggregate tally is shown.
               {tally.workerCount > 0 && ` ${tally.workerCount} agents participated.`}
             </p>
           </div>

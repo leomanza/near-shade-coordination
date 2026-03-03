@@ -132,7 +132,7 @@ function PageShell({
         {children}
 
         <footer className="mt-8 text-center text-[10px] text-zinc-700 font-mono">
-          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Nova SDK
+          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Storacha
         </footer>
       </div>
     </div>
@@ -182,10 +182,10 @@ function CoordinatorContent() {
         const type = status === "completed" ? "success" : status === "failed" ? "error" : "info";
         addLog(`${id}: ${prev} -> ${status}`, type);
         if (status === "processing") {
-          addLog(`[nova] ${id}: loading persistent identity from Nova...`, "info");
+          addLog(`[storacha] ${id}: loading persistent identity from Storacha...`, "info");
         }
         if (status === "completed" && prev === "processing") {
-          addLog(`[nova] ${id}: decision recorded to Nova persistent memory`, "success");
+          addLog(`[storacha] ${id}: decision recorded to Storacha persistent memory`, "success");
         }
       }
     }
@@ -213,7 +213,7 @@ function CoordinatorContent() {
     addLog("Resetting all Ensue memory...", "info");
     const result = await resetMemory();
     if (result) {
-      addLog("Ensue memory reset (Nova persistent memory preserved)", "success");
+      addLog("Ensue memory reset (Storacha persistent memory preserved)", "success");
     } else {
       addLog("Failed to reset memory", "error");
     }
@@ -355,9 +355,9 @@ function VotingFlowDiagram({
       <div className="font-mono text-xs space-y-2 text-zinc-500">
         <FlowStep n={1} label="Proposal submitted to contract" active={coordStatus?.status === "idle"} />
         <FlowStep n={2} label="Coordinator dispatches to voters" active={coordStatus?.status === "monitoring"} />
-        <FlowStep n={3} label="Agents load identity from Nova" active={hasStatus("processing")} nova />
+        <FlowStep n={3} label="Agents load identity from Storacha" active={hasStatus("processing")} persistent />
         <FlowStep n={4} label="AI deliberation (manifesto + identity)" active={hasStatus("processing")} />
-        <FlowStep n={5} label="Record decision to Nova memory" active={hasStatus("completed")} nova />
+        <FlowStep n={5} label="Record decision to Storacha memory" active={hasStatus("completed")} persistent />
         <FlowStep n={6} label="Record votes on-chain (nullifier)" active={coordStatus?.status === "recording_submissions"} />
         <FlowStep n={7} label="Coordinator tallies votes" active={coordStatus?.status === "aggregating"} />
         <FlowStep n={8} label="Result finalized on-chain" active={coordStatus?.status === "completed" || coordStatus?.status === "resuming"} />
@@ -370,7 +370,7 @@ function VotingFlowDiagram({
         </div>
         <div className="flex items-center gap-1.5 text-[9px] text-zinc-600 font-mono">
           <span className="h-2 w-2 rounded-full bg-[#00ff41]/30" />
-          Nova (persistent)
+          Storacha (persistent)
         </div>
         <div className="flex items-center gap-1.5 text-[9px] text-zinc-600 font-mono">
           <span className="h-2 w-2 rounded-full bg-zinc-500" />
@@ -383,26 +383,26 @@ function VotingFlowDiagram({
 
 /* ─── Flow Step ──────────────────────────────────────────────────────────── */
 
-function FlowStep({ n, label, active, nova }: { n: number; label: string; active?: boolean; nova?: boolean }) {
+function FlowStep({ n, label, active, persistent }: { n: number; label: string; active?: boolean; persistent?: boolean }) {
   return (
     <div className={`flex items-center gap-3 p-2 rounded-lg transition-colors ${active ? "bg-zinc-800/80 text-zinc-200" : ""}`}>
       <span
         className={`flex items-center justify-center h-6 w-6 rounded-full text-[10px] font-bold shrink-0 ${
           active
-            ? nova ? "bg-[#00ff41]/20 text-[#00ff41] border border-[#00ff41]/30" : "bg-blue-600 text-white"
-            : nova ? "bg-[#00ff41]/5 text-[#00ff41]/40 border border-[#00ff41]/10" : "bg-zinc-800 text-zinc-500"
+            ? persistent ? "bg-[#00ff41]/20 text-[#00ff41] border border-[#00ff41]/30" : "bg-blue-600 text-white"
+            : persistent ? "bg-[#00ff41]/5 text-[#00ff41]/40 border border-[#00ff41]/10" : "bg-zinc-800 text-zinc-500"
         }`}
       >
         {n}
       </span>
-      <span className={nova && !active ? "text-zinc-600" : ""}>{label}</span>
-      {nova && (
+      <span className={persistent && !active ? "text-zinc-600" : ""}>{label}</span>
+      {persistent && (
         <span className="text-[8px] font-bold px-1 py-0.5 rounded bg-[#00ff41]/10 text-[#00ff41]/40 border border-[#00ff41]/10 font-mono">
-          NOVA
+          STORACHA
         </span>
       )}
       {active && (
-        <span className={`ml-auto text-[10px] animate-pulse-dot ${nova ? "text-[#00ff41]" : "text-blue-400"}`}>
+        <span className={`ml-auto text-[10px] animate-pulse-dot ${persistent ? "text-[#00ff41]" : "text-blue-400"}`}>
           ACTIVE
         </span>
       )}

@@ -401,7 +401,7 @@ export interface RegistryWorker {
   owner: string;
   coordinator_id: string | null;
   phala_cvm_id: string | null;
-  nova_group_id: string | null;
+  storacha_space_did: string | null;
   endpoint_url: string | null;
   created_at: number;
   active: boolean;
@@ -435,9 +435,9 @@ export interface DeployRequest {
   sponsorPrivateKey?: string;
   nearNetwork?: string;
   // Worker fields
-  novaApiKey?: string;
-  novaAccountId?: string;
-  novaGroupId?: string;
+  storachaAgentPrivateKey?: string;
+  storachaDelegationProof?: string;
+  storachaSpaceDid?: string;
   coordinatorId?: string;
 }
 
@@ -472,7 +472,7 @@ export async function pollDeployEndpoint(cvmId: string, phalaApiKey: string): Pr
   return url ?? null;
 }
 
-// ── Nova / Agent Identity API (direct to worker) ──
+// ── Storacha / Agent Identity API (direct to worker) ──
 
 export interface AgentManifesto {
   agentId: string;
