@@ -4,8 +4,10 @@ import {
   getWorkerKeys,
   getProposalKeys,
   getProposalWorkerKeys,
+  getCoordinatorSnapshotKey,
   PROPOSAL_INDEX_KEY,
 } from '@near-shade-coordination/shared';
+import { getAgentDid } from '../storacha/identity';
 import type {
   CoordinationRequest,
   WorkerResult,
@@ -36,46 +38,76 @@ const POLL_INTERVAL = Number(process.env.POLL_INTERVAL) || 5000;
 // Worker completion timeout (120 seconds - needs room for Nova load + AI inference + Nova record)
 const WORKER_TIMEOUT = 120000;
 
-/* ─── Dynamic Worker Configuration ───────────────────────────────────────── */
+/* ─── Dynamic Worker Discovery (Registry-based) ─────────────────────────── */
 
-interface WorkerConfig {
-  id: string;
-  url: string;
+interface WorkerRecord {
+  account_id: string;
+  coordinator_did: string;
+  worker_did: string;
+  endpoint_url: string;
+  cvm_id: string;
+  registered_at: number;
+  is_active: boolean;
 }
 
 /**
- * Get the list of configured workers from environment.
- * Supports two formats:
- *   WORKERS=worker1:3001,worker2:3002          (localhost ports)
- *   WORKERS=worker1|https://url1,worker2|https://url2  (full URLs)
- * Falls back to the default 3 workers.
+ * Query the NEAR registry contract for active workers assigned to this coordinator.
+ * Falls back to WORKERS env for backward compatibility (LOCAL_MODE without registry).
  */
-function getWorkerConfigs(): WorkerConfig[] {
-  const workersEnv = process.env.WORKERS;
-  if (workersEnv) {
-    return workersEnv.split(',').map(entry => {
-      const trimmed = entry.trim();
-      // Pipe delimiter = full URL format
-      if (trimmed.includes('|')) {
-        const [id, ...urlParts] = trimmed.split('|');
-        return { id, url: urlParts.join('|') };
-      }
-      // Colon delimiter = localhost port format
-      const [id, port] = trimmed.split(':');
-      return { id, url: `http://localhost:${port}` };
+async function getActiveWorkers(): Promise<WorkerRecord[]> {
+  try {
+    const { localViewRegistry } = await import('../contract/local-contract');
+    const coordinatorDID = await getAgentDid();
+    const workers = await localViewRegistry<WorkerRecord[]>('get_workers_for_coordinator', {
+      coordinator_did: coordinatorDID,
     });
+    if (workers && workers.length > 0) {
+      return workers.filter(w => w.is_active);
+    }
+  } catch (err) {
+    console.warn('[discovery] Registry query failed, falling back to WORKERS env:', err);
   }
 
-  // Default: 3 workers on ports 3001-3003
-  return [
-    { id: 'worker1', url: 'http://localhost:3001' },
-    { id: 'worker2', url: 'http://localhost:3002' },
-    { id: 'worker3', url: 'http://localhost:3003' },
-  ];
+  // Fallback: parse WORKERS env (backward compatible with LOCAL_MODE)
+  return getWorkerRecordsFromEnv();
 }
 
-function getWorkerIds(): string[] {
-  return getWorkerConfigs().map(w => w.id);
+/**
+ * Fallback: build WorkerRecord[] from the WORKERS env variable.
+ * Used when registry is unavailable or empty.
+ */
+function getWorkerRecordsFromEnv(): WorkerRecord[] {
+  const workersEnv = process.env.WORKERS;
+  const entries: Array<{ id: string; url: string }> = [];
+
+  if (workersEnv) {
+    for (const entry of workersEnv.split(',')) {
+      const trimmed = entry.trim();
+      if (trimmed.includes('|')) {
+        const [id, ...urlParts] = trimmed.split('|');
+        entries.push({ id, url: urlParts.join('|') });
+      } else {
+        const [id, port] = trimmed.split(':');
+        entries.push({ id, url: `http://localhost:${port}` });
+      }
+    }
+  } else {
+    entries.push(
+      { id: 'worker1', url: 'http://localhost:3001' },
+      { id: 'worker2', url: 'http://localhost:3002' },
+      { id: 'worker3', url: 'http://localhost:3003' },
+    );
+  }
+
+  return entries.map(e => ({
+    account_id: '',
+    coordinator_did: '',
+    worker_did: e.id,           // Use worker name as DID fallback
+    endpoint_url: e.url,
+    cvm_id: '',
+    registered_at: 0,
+    is_active: true,
+  }));
 }
 
 /**
@@ -119,29 +151,68 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
   console.log('[LOCAL] Task config:', taskConfig);
 
   try {
-    // Step 1: Start coordination on-chain (creates yield + pending request)
+    // Step 1: Take snapshot of active workers from registry
     const configHash = crypto.createHash('sha256').update(taskConfig).digest('hex');
+    console.log('[LOCAL] Discovering active workers from registry...');
+
+    const workers = await getActiveWorkers();
+    const minWorkers = parseInt(process.env.MIN_WORKERS ?? '1');
+    const maxWorkers = parseInt(process.env.MAX_WORKERS ?? '10');
+
+    if (workers.length < minWorkers) {
+      console.warn(`[LOCAL] Not enough active workers (${workers.length} < ${minWorkers}). Cannot start coordination.`);
+      await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'idle');
+      return null;
+    }
+
+    // Limit to max_workers
+    const activeWorkers = workers.slice(0, maxWorkers);
+
+    // Parse voting_config from task config for per-proposal overrides
+    let parsedConfig: any = {};
+    try { parsedConfig = JSON.parse(taskConfig); } catch { /* ignore */ }
+    const votingConfig = parsedConfig?.parameters?.voting_config;
+    const effectiveMinWorkers = votingConfig?.min_workers ?? minWorkers;
+    const effectiveQuorum = votingConfig?.quorum ?? 0; // 0 = coordinator enforces majority
+
+    if (activeWorkers.length < effectiveMinWorkers) {
+      console.warn(`[LOCAL] Not enough workers for this proposal (${activeWorkers.length} < ${effectiveMinWorkers}).`);
+      await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'idle');
+      return null;
+    }
+
+    console.log(`[LOCAL] ${activeWorkers.length} active workers discovered: [${activeWorkers.map(w => w.worker_did).join(', ')}]`);
+
+    // Step 2: Start coordination on-chain (creates yield + pending request)
     console.log('[LOCAL] Starting on-chain coordination...');
 
     let proposalId: number | null = null;
     try {
-      proposalId = await localStartCoordination(taskConfig);
+      proposalId = await localStartCoordination(taskConfig, activeWorkers.length, effectiveQuorum);
       if (proposalId !== null) {
         console.log(`[LOCAL] On-chain proposal #${proposalId} created`);
         await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_PROPOSAL_ID, proposalId.toString());
+
+        // Store worker snapshot for this proposal (prevents mid-vote registration changes)
+        // getCoordinatorSnapshotKey imported at top level
+        await getEnsueClient().updateMemory(
+          getCoordinatorSnapshotKey(proposalId),
+          JSON.stringify(activeWorkers.map(w => w.worker_did))
+        );
       }
     } catch (err) {
       console.warn('[LOCAL] Contract call failed, continuing without on-chain:', err);
     }
 
-    // Step 2: Update coordinator status
+    // Step 3: Update coordinator status
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'monitoring');
 
-    // Step 3: Trigger all workers by writing task config to Ensue + HTTP
-    await triggerWorkers(taskConfig);
+    // Step 4: Trigger all workers by writing task config to Ensue + HTTP
+    await triggerWorkers(taskConfig, activeWorkers);
 
-    // Step 4: Monitor Ensue for worker completions
-    const allCompleted = await waitForWorkers(WORKER_TIMEOUT);
+    // Step 5: Monitor Ensue for worker completions
+    const workerDIDs = activeWorkers.map(w => w.worker_did);
+    const allCompleted = await waitForWorkers(workerDIDs, WORKER_TIMEOUT);
 
     if (!allCompleted) {
       console.error('[LOCAL] Timeout waiting for workers to complete');
@@ -149,13 +220,12 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
       return null;
     }
 
-    // Step 5: Record worker submissions on-chain (nullifier)
-    const workerIds = getWorkerIds();
+    // Step 6: Record worker submissions on-chain (nullifier)
     if (proposalId !== null) {
       await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'recording_submissions');
       console.log('[LOCAL] Recording worker submissions on-chain...');
 
-      const resultKeys = workerIds.map(id => getWorkerKeys(id).RESULT);
+      const resultKeys = workerDIDs.map(did => getWorkerKeys(did).RESULT);
       const workerResults = await getEnsueClient().readMultiple(resultKeys);
       // Only send worker_id + result_hash on-chain (nullifier).
       // Individual votes stay private in Ensue shared memory.
@@ -185,7 +255,7 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
       }
     }
 
-    // Step 6: Aggregate results (vote tally)
+    // Step 7: Aggregate results (vote tally)
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'aggregating');
     const tally = await aggregateResults(proposalId ?? 0);
 
@@ -193,9 +263,9 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_TALLY, JSON.stringify(tally));
     console.log('\n[LOCAL] Aggregation complete:', JSON.stringify(tally, null, 2));
 
-    // Step 6b: Archive proposal to Ensue (persistent history)
+    // Step 7b: Archive proposal to Ensue (persistent history)
     const pid = proposalId?.toString() ?? `local-${Date.now()}`;
-    await archiveProposal(pid, taskConfig, tally, workerIds);
+    await archiveProposal(pid, taskConfig, tally, workerDIDs);
 
     // Step 6c: Back up deliberation to Storacha (encrypted, persistent)
     if (isVaultConfigured()) {
@@ -276,13 +346,25 @@ async function checkLocalCoordination(): Promise<void> {
     return;
   }
 
-  // Log active states
-  const workerIds = getWorkerIds();
-  const statusKeys = workerIds.map(id => getWorkerKeys(id).STATUS);
+  // Log active states — try to use snapshot DIDs, fall back to registry
+  let workerDIDs: string[] = [];
+  const proposalIdStr = await getEnsueClient().readMemory(MEMORY_KEYS.COORDINATOR_PROPOSAL_ID);
+  if (proposalIdStr) {
+    // getCoordinatorSnapshotKey imported at top level
+    const snapshotStr = await getEnsueClient().readMemory(getCoordinatorSnapshotKey(proposalIdStr));
+    if (snapshotStr) {
+      try { workerDIDs = JSON.parse(snapshotStr); } catch { /* ignore */ }
+    }
+  }
+  if (workerDIDs.length === 0) {
+    const workers = await getActiveWorkers();
+    workerDIDs = workers.map(w => w.worker_did);
+  }
+  const statusKeys = workerDIDs.map(did => getWorkerKeys(did).STATUS);
   const statuses = await getEnsueClient().readMultiple(statusKeys);
   const statusMap: Record<string, string> = {};
-  for (const id of workerIds) {
-    statusMap[id] = statuses[getWorkerKeys(id).STATUS] || 'unknown';
+  for (const did of workerDIDs) {
+    statusMap[did] = statuses[getWorkerKeys(did).STATUS] || 'unknown';
   }
   console.log('[LOCAL] Worker statuses:', statusMap);
 }
@@ -339,14 +421,23 @@ async function processCoordination(
       proposalId.toString()
     );
 
+    // Discover active workers and snapshot them for this proposal
+    const activeWorkers = await getActiveWorkers();
+    const workerDIDs = activeWorkers.map(w => w.worker_did);
+    // getCoordinatorSnapshotKey imported at top level
+    await getEnsueClient().updateMemory(
+      getCoordinatorSnapshotKey(proposalId),
+      JSON.stringify(workerDIDs)
+    );
+
     // Update coordinator status
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'monitoring');
 
     // Trigger all workers by writing task config to Ensue
-    await triggerWorkers(request.task_config);
+    await triggerWorkers(request.task_config, activeWorkers);
 
     // Monitor Ensue for worker completions
-    const allCompleted = await waitForWorkers(WORKER_TIMEOUT);
+    const allCompleted = await waitForWorkers(workerDIDs, WORKER_TIMEOUT);
 
     if (!allCompleted) {
       console.error('Timeout waiting for workers to complete');
@@ -355,13 +446,12 @@ async function processCoordination(
     }
 
     // Record worker submissions on-chain (nullifier)
-    const workerIds = getWorkerIds();
     await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'recording_submissions');
     console.log('Recording worker submissions on-chain...');
 
     // Only send worker_id + result_hash on-chain (nullifier).
     // Individual votes stay private in Ensue shared memory.
-    const resultKeys = workerIds.map(id => getWorkerKeys(id).RESULT);
+    const resultKeys = workerDIDs.map(did => getWorkerKeys(did).RESULT);
     const workerResults = await getEnsueClient().readMultiple(resultKeys);
     const submissions = resultKeys
       .map(key => {
@@ -397,7 +487,7 @@ async function processCoordination(
     console.log('\nAggregation complete:', tally);
 
     // Archive proposal to Ensue (persistent history)
-    await archiveProposal(proposalId.toString(), request.task_config, tally, workerIds);
+    await archiveProposal(proposalId.toString(), request.task_config, tally, workerDIDs);
 
     // Back up deliberation to Storacha (encrypted, persistent)
     if (isVaultConfigured()) {
@@ -441,17 +531,15 @@ async function processCoordination(
  * Trigger all workers by writing task config to Ensue
  * In local mode, also call worker HTTP APIs directly
  */
-async function triggerWorkers(taskConfig: string): Promise<void> {
+async function triggerWorkers(taskConfig: string, workers: WorkerRecord[]): Promise<void> {
   console.log('\nTriggering workers...');
-
-  const workers = getWorkerConfigs();
 
   // Write task config to shared memory
   await getEnsueClient().updateMemory(MEMORY_KEYS.CONFIG_TASK_DEFINITION, taskConfig);
 
   // Reset all worker statuses to pending
   await Promise.all(
-    workers.map(w => getEnsueClient().updateMemory(getWorkerKeys(w.id).STATUS, 'pending'))
+    workers.map(w => getEnsueClient().updateMemory(getWorkerKeys(w.worker_did).STATUS, 'pending'))
   );
 
   // In local mode, trigger workers via HTTP
@@ -459,17 +547,17 @@ async function triggerWorkers(taskConfig: string): Promise<void> {
     const parsed = (() => { try { return JSON.parse(taskConfig); } catch { return { type: 'random' }; } })();
 
     await Promise.all(
-      workers.map(async ({ id, url }) => {
+      workers.map(async (w) => {
         try {
-          const res = await fetch(`${url}/api/task/execute`, {
+          const res = await fetch(`${w.endpoint_url}/api/task/execute`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ taskConfig: parsed }),
           });
           const data = await res.json();
-          console.log(`[LOCAL] Triggered ${id} (${url}):`, data);
+          console.log(`[LOCAL] Triggered ${w.worker_did} (${w.endpoint_url}):`, data);
         } catch (error) {
-          console.error(`[LOCAL] Failed to trigger ${id} (${url}):`, error);
+          console.error(`[LOCAL] Failed to trigger ${w.worker_did} (${w.endpoint_url}):`, error);
         }
       })
     );
@@ -482,12 +570,16 @@ async function triggerWorkers(taskConfig: string): Promise<void> {
  * Wait for all workers to complete their tasks
  * Polls Ensue every second until all workers show "completed" status
  */
-async function waitForWorkers(timeout: number): Promise<boolean> {
-  console.log('\nMonitoring worker statuses...');
+async function waitForWorkers(workerDIDs: string[], timeout: number): Promise<boolean> {
+  console.log(`\nMonitoring ${workerDIDs.length} worker statuses...`);
+
+  if (workerDIDs.length === 0) {
+    console.warn('[LOCAL] No workers to wait for');
+    return false;
+  }
 
   const startTime = Date.now();
-  const workerIds = getWorkerIds();
-  const statusKeys = workerIds.map(id => getWorkerKeys(id).STATUS);
+  const statusKeys = workerDIDs.map(did => getWorkerKeys(did).STATUS);
 
   while (Date.now() - startTime < timeout) {
     // Read all worker statuses from Ensue
@@ -497,9 +589,9 @@ async function waitForWorkers(timeout: number): Promise<boolean> {
     let allDone = true;
     let anyFailed = false;
 
-    for (const id of workerIds) {
-      const status = statuses[getWorkerKeys(id).STATUS] || 'unknown';
-      statusMap[id] = status;
+    for (const did of workerDIDs) {
+      const status = statuses[getWorkerKeys(did).STATUS] || 'unknown';
+      statusMap[did] = status;
       if (status !== 'completed' && status !== 'failed') allDone = false;
       if (status === 'failed') anyFailed = true;
     }
@@ -530,8 +622,28 @@ async function waitForWorkers(timeout: number): Promise<boolean> {
 async function aggregateResults(proposalId: number): Promise<TallyResult> {
   console.log('\nAggregating worker results...');
 
-  const workerIds = getWorkerIds();
-  const resultKeys = workerIds.map(id => getWorkerKeys(id).RESULT);
+  // Read worker DIDs from snapshot (taken at vote start)
+  // getCoordinatorSnapshotKey imported at top level
+  const snapshotStr = await getEnsueClient().readMemory(getCoordinatorSnapshotKey(proposalId));
+  let workerDIDs: string[] = [];
+  if (snapshotStr) {
+    try { workerDIDs = JSON.parse(snapshotStr); } catch { /* ignore */ }
+  }
+  // Fallback if no snapshot (e.g. local-0 proposals)
+  if (workerDIDs.length === 0) {
+    const workers = await getActiveWorkers();
+    workerDIDs = workers.map(w => w.worker_did);
+  }
+
+  // Parse voting_config for quorum
+  const taskConfigStr = await getEnsueClient().readMemory(MEMORY_KEYS.CONFIG_TASK_DEFINITION);
+  let votingConfig: { min_workers?: number; quorum?: number } | undefined;
+  try {
+    const parsed = JSON.parse(taskConfigStr ?? '{}');
+    votingConfig = parsed?.parameters?.voting_config;
+  } catch { /* ignore */ }
+
+  const resultKeys = workerDIDs.map(did => getWorkerKeys(did).RESULT);
   const results = await getEnsueClient().readMultiple(resultKeys);
 
   // Parse worker results
@@ -571,13 +683,15 @@ async function aggregateResults(proposalId: number): Promise<TallyResult> {
     ? approved  // For vote tasks, aggregatedValue = number of approvals
     : workerResults.reduce((sum, r) => sum + (r.output?.value || 0), 0);
 
-  const decision = approved >= rejected ? 'Approved' : 'Rejected';
+  // Quorum-aware decision: use voting_config.quorum if set, otherwise strict majority
+  const minPositives = votingConfig?.quorum ?? (Math.floor(workerDIDs.length / 2) + 1);
+  const decision = hasVotes ? (approved >= minPositives ? 'Approved' : 'Rejected') : 'Approved';
 
   const tally: TallyResult = {
     aggregatedValue,
     approved,
     rejected,
-    decision: hasVotes ? decision : 'Approved',
+    decision,
     workerCount: workerResults.length,
     workers: workerResults,
     timestamp: new Date().toISOString(),

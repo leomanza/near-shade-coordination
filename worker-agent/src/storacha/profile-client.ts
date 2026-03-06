@@ -1,17 +1,21 @@
 /**
  * StorachaProfileClient — Persistent worker profile storage via Storacha + Lit.
  *
- * Replaces the old pattern of fs.readFileSync(profiles.json) + in-memory decision array.
- * Each data section (manifesto, preferences, decisions, knowledge) is stored as a
- * separate encrypted JSON blob in Storacha. A lightweight index blob tracks CIDs.
+ * Storacha is the PRIMARY persistent store for worker identity and memory.
+ * Ensue stores ONLY CID pointers (not plaintext data).
  *
- * Fallback: When Storacha is not configured, reads profiles.json and stores
- * decisions in memory (current V1 behavior, for LOCAL_MODE development).
+ * Architecture:
+ *   WRITE: encryptAndVault(data) → Storacha encrypted blob → CID stored in Ensue
+ *   READ:  get CID from Ensue → retrieveAndDecrypt(cid) → data
+ *
+ * Fallback: profiles.json seed (only when Storacha not yet seeded via migration script).
+ * Run: scripts/migrate-profiles-to-storacha.ts --worker workerN
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { encryptAndVault, isVaultConfigured } from './vault';
+import { encryptAndVault, retrieveAndDecrypt, isVaultConfigured } from './vault';
+import { createStorachaClient } from './identity';
 import type {
   AgentManifesto,
   AgentPreferences,
@@ -61,7 +65,7 @@ const GENERIC_SEED: SeedProfile = {
 
 /**
  * Load a worker's seed profile from config/profiles.json.
- * Used as fallback when Storacha is not configured and as initial seed data.
+ * Used as fallback when Storacha is not yet seeded.
  */
 function loadSeedProfile(): SeedProfile {
   try {
@@ -91,6 +95,27 @@ function seedToPreferences(seed: SeedProfile): AgentPreferences {
     knowledgeNotes: [],
     updatedAt: new Date().toISOString(),
   };
+}
+
+/* ─── Storacha decrypt helper ────────────────────────────────────────────── */
+
+/**
+ * Decrypt a Storacha-vaulted blob by CID.
+ * Uses ephemeral EVM wallet for Lit auth session (access is gated by UCAN proof).
+ */
+async function readFromStoracha(cidStr: string): Promise<unknown> {
+  const storachaClient = await createStorachaClient();
+  const proofs = storachaClient.proofs();
+  if (!proofs || proofs.length === 0) {
+    throw new Error('No UCAN proofs available for Storacha decryption');
+  }
+  const decryptDelegation = proofs[0];
+
+  // Ephemeral EVM wallet — Lit session auth only; access is gated by UCAN proof
+  const { generatePrivateKey, privateKeyToAccount } = await import('viem/accounts');
+  const wallet = privateKeyToAccount(generatePrivateKey());
+
+  return retrieveAndDecrypt(cidStr, wallet, decryptDelegation);
 }
 
 /* ─── StorachaProfileClient ──────────────────────────────────────────────── */
@@ -128,8 +153,24 @@ export class StorachaProfileClient {
     const cached = this.cache.get('manifesto') as AgentManifesto | undefined;
     if (cached) return cached;
 
-    // For now, manifesto always comes from seed profile.
-    // When migration script runs, this will read from Storacha index CID.
+    if (this.useStoracha) {
+      // Read CID from Ensue → decrypt from Storacha (primary path)
+      try {
+        const { createEnsueClient } = await import('@near-shade-coordination/shared');
+        const ensue = createEnsueClient();
+        const cidStr = await ensue.readMemory(`agent/${this.workerId}/manifesto_cid`);
+        if (cidStr) {
+          const manifesto = await readFromStoracha(cidStr) as AgentManifesto;
+          this.cache.set('manifesto', manifesto);
+          return manifesto;
+        }
+      } catch (e) {
+        console.warn(`[profile:${this.workerId}] Storacha manifesto read failed:`, e);
+      }
+    }
+
+    // Fall back to seed profile (run migrate-profiles-to-storacha.ts to seed Storacha)
+    console.warn(`[profile:${this.workerId}] No Storacha manifesto yet — using seed profile (run migration script)`);
     const seed = loadSeedProfile();
     const manifesto = seedToManifesto(seed);
     this.cache.set('manifesto', manifesto);
@@ -142,6 +183,24 @@ export class StorachaProfileClient {
     const cached = this.cache.get('preferences') as AgentPreferences | undefined;
     if (cached) return cached;
 
+    if (this.useStoracha) {
+      // Read CID from Ensue → decrypt from Storacha (primary path)
+      try {
+        const { createEnsueClient } = await import('@near-shade-coordination/shared');
+        const ensue = createEnsueClient();
+        const cidStr = await ensue.readMemory(`agent/${this.workerId}/preferences_cid`);
+        if (cidStr) {
+          const prefs = await readFromStoracha(cidStr) as AgentPreferences;
+          this.cache.set('preferences', prefs);
+          return prefs;
+        }
+      } catch (e) {
+        console.warn(`[profile:${this.workerId}] Storacha preferences read failed:`, e);
+      }
+    }
+
+    // Fall back to seed profile
+    console.warn(`[profile:${this.workerId}] No Storacha preferences yet — using seed profile (run migration script)`);
     const seed = loadSeedProfile();
     const prefs = seedToPreferences(seed);
     this.cache.set('preferences', prefs);
@@ -163,44 +222,26 @@ export class StorachaProfileClient {
       return this.fallbackDecisions;
     }
 
-    // Try to read decisions from Storacha via the Ensue index key
-    // The index is stored in Ensue as a known key so we can find it without
-    // needing to remember the CID across restarts.
+    // Read CID from Ensue → decrypt decisions from Storacha
     try {
-      const { createEnsueClient, MEMORY_KEYS } = await import('@near-shade-coordination/shared');
+      const { createEnsueClient } = await import('@near-shade-coordination/shared');
       const ensue = createEnsueClient();
-      const indexKey = `agent/${this.workerId}/storacha/decisions_cid`;
-      const cidStr = await ensue.readMemory(indexKey);
+      const cidStr = await ensue.readMemory(`agent/${this.workerId}/decisions_cid`);
       if (cidStr) {
-        // We have a CID — but decryption requires wallet + delegation which
-        // adds complexity. For V1 of this client, we store decisions as
-        // plaintext in Ensue (encrypted at rest by Ensue) and use Storacha
-        // for the encrypted backup. This avoids the decrypt wallet requirement.
-        const decisionsStr = await ensue.readMemory(`agent/${this.workerId}/decisions`);
-        if (decisionsStr) {
-          const decisions = JSON.parse(decisionsStr) as DecisionRecord[];
-          this.cache.set('decisions', decisions);
-          return decisions;
-        }
-      }
-
-      // Also check the Ensue-only fallback key
-      const decisionsStr = await ensue.readMemory(`agent/${this.workerId}/decisions`);
-      if (decisionsStr) {
-        const decisions = JSON.parse(decisionsStr) as DecisionRecord[];
+        const decisions = await readFromStoracha(cidStr) as DecisionRecord[];
         this.cache.set('decisions', decisions);
         return decisions;
       }
     } catch (e) {
-      console.warn(`[profile:${this.workerId}] Failed to read decisions from Ensue:`, e);
+      console.warn(`[profile:${this.workerId}] Storacha decisions read failed:`, e);
     }
 
     return [];
   }
 
   /**
-   * Save a decision to persistent storage.
-   * Returns the Storacha CID if encrypted backup succeeded, or null for Ensue-only.
+   * Save a decision to Storacha (primary) with CID pointer in Ensue.
+   * Storacha is the only persistent store — no plaintext in Ensue.
    */
   async saveDecision(record: DecisionRecord): Promise<string | null> {
     // Update in-memory cache
@@ -214,37 +255,28 @@ export class StorachaProfileClient {
       return null;
     }
 
-    // Persist to Ensue (fast, always available)
-    let storachaCid: string | null = null;
     try {
+      // Encrypt and upload to Storacha
+      const cid = await encryptAndVault(updated, {
+        name: `${this.workerId}-decisions.json`,
+      });
+
+      // Store CID pointer in Ensue (not plaintext data)
       const { createEnsueClient } = await import('@near-shade-coordination/shared');
       const ensue = createEnsueClient();
       await ensue.updateMemory(
-        `agent/${this.workerId}/decisions`,
-        JSON.stringify(updated),
+        `agent/${this.workerId}/decisions_cid`,
+        cid,
       );
 
-      // Encrypted backup to Storacha
-      try {
-        storachaCid = await encryptAndVault(updated, {
-          name: `${this.workerId}-decisions.json`,
-        });
-        // Store the CID reference in Ensue so we can find it later
-        await ensue.updateMemory(
-          `agent/${this.workerId}/storacha/decisions_cid`,
-          storachaCid,
-        );
-        console.log(`[profile:${this.workerId}] Decision saved to Ensue + Storacha (CID: ${storachaCid})`);
-      } catch (e) {
-        console.warn(`[profile:${this.workerId}] Storacha backup failed (Ensue-only):`, e);
-      }
+      console.log(`[profile:${this.workerId}] Decision saved to Storacha (CID: ${cid})`);
+      return cid;
     } catch (e) {
-      // Ensue also failed — fall back to in-memory
+      // Storacha failed — fall back to in-memory
       this.fallbackDecisions = updated;
-      console.warn(`[profile:${this.workerId}] All persistence failed, decision in-memory only:`, e);
+      console.warn(`[profile:${this.workerId}] Storacha save failed, decision in-memory only:`, e);
+      return null;
     }
-
-    return storachaCid;
   }
 
   /* ─── Knowledge Notes ────────────────────────────────────────────────── */
@@ -257,17 +289,18 @@ export class StorachaProfileClient {
       return this.fallbackKnowledge;
     }
 
+    // Read CID from Ensue → decrypt from Storacha
     try {
       const { createEnsueClient } = await import('@near-shade-coordination/shared');
       const ensue = createEnsueClient();
-      const notesStr = await ensue.readMemory(`agent/${this.workerId}/knowledge`);
-      if (notesStr) {
-        const notes = JSON.parse(notesStr) as string[];
+      const cidStr = await ensue.readMemory(`agent/${this.workerId}/knowledge_cid`);
+      if (cidStr) {
+        const notes = await readFromStoracha(cidStr) as string[];
         this.cache.set('knowledge', notes);
         return notes;
       }
     } catch (e) {
-      console.warn(`[profile:${this.workerId}] Failed to read knowledge from Ensue:`, e);
+      console.warn(`[profile:${this.workerId}] Storacha knowledge read failed:`, e);
     }
 
     return [];
@@ -283,32 +316,22 @@ export class StorachaProfileClient {
       return null;
     }
 
-    let storachaCid: string | null = null;
     try {
+      const cid = await encryptAndVault(updated, {
+        name: `${this.workerId}-knowledge.json`,
+      });
       const { createEnsueClient } = await import('@near-shade-coordination/shared');
       const ensue = createEnsueClient();
       await ensue.updateMemory(
-        `agent/${this.workerId}/knowledge`,
-        JSON.stringify(updated),
+        `agent/${this.workerId}/knowledge_cid`,
+        cid,
       );
-
-      try {
-        storachaCid = await encryptAndVault(updated, {
-          name: `${this.workerId}-knowledge.json`,
-        });
-        await ensue.updateMemory(
-          `agent/${this.workerId}/storacha/knowledge_cid`,
-          storachaCid,
-        );
-      } catch (e) {
-        console.warn(`[profile:${this.workerId}] Storacha knowledge backup failed:`, e);
-      }
+      return cid;
     } catch (e) {
       this.fallbackKnowledge = updated;
-      console.warn(`[profile:${this.workerId}] Knowledge persistence failed:`, e);
+      console.warn(`[profile:${this.workerId}] Storacha knowledge save failed:`, e);
+      return null;
     }
-
-    return storachaCid;
   }
 
   /* ─── Full Identity (convenience) ────────────────────────────────────── */

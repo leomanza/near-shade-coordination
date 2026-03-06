@@ -1,14 +1,16 @@
 /**
- * One-time migration script: Seed worker profile data to Storacha via Ensue.
+ * One-time migration script: Seed worker profile data to Storacha.
  *
- * Reads config/profiles.json and uploads the specified worker's profile
- * sections (manifesto, preferences, decisions, knowledge) as initial data.
+ * Reads config/profiles.json, uploads each section as an ENCRYPTED blob to Storacha,
+ * and stores the returned CIDs in Ensue as index pointers.
+ * Storacha is the PRIMARY store; Ensue holds only CID pointers.
  *
- * Usage:
+ * Usage (run from project root):
  *   DOTENV_CONFIG_PATH=worker-agent/.env.worker1.local \
  *     npx tsx -r dotenv/config scripts/migrate-profiles-to-storacha.ts --worker worker1
  *
  * Idempotent — re-running overwrites with fresh seed data.
+ * Required before workers can load profiles from Storacha at runtime.
  */
 
 import * as fs from 'fs';
@@ -56,10 +58,7 @@ async function main() {
     process.exit(1);
   }
 
-  // 3. Write profile sections to Ensue (the primary persistence layer)
-  const { createEnsueClient } = await import('@near-shade-coordination/shared');
-  const ensue = createEnsueClient();
-
+  // 3. Build profile data sections
   const manifesto = {
     agentId: workerId,
     name: profile.name,
@@ -78,48 +77,53 @@ async function main() {
   const decisions: unknown[] = [];
   const knowledge: string[] = [];
 
-  console.log('\nWriting to Ensue...');
-
-  await ensue.updateMemory(`agent/${workerId}/manifesto`, JSON.stringify(manifesto));
-  console.log(`  ✓ agent/${workerId}/manifesto`);
-
-  await ensue.updateMemory(`agent/${workerId}/preferences`, JSON.stringify(preferences));
-  console.log(`  ✓ agent/${workerId}/preferences`);
-
-  await ensue.updateMemory(`agent/${workerId}/decisions`, JSON.stringify(decisions));
-  console.log(`  ✓ agent/${workerId}/decisions`);
-
-  await ensue.updateMemory(`agent/${workerId}/knowledge`, JSON.stringify(knowledge));
-  console.log(`  ✓ agent/${workerId}/knowledge`);
-
-  // 4. Encrypted backup to Storacha
+  // 4. Encrypt + upload each section to Storacha
   console.log('\nEncrypting and uploading to Storacha...');
-
-  // Dynamic import for ESM-only vault module
   const vault = await import('../worker-agent/src/storacha/vault');
 
-  const fullProfile = {
-    type: 'worker_profile_seed',
-    workerId,
-    manifesto,
-    preferences,
-    decisions,
-    knowledge,
-    migratedAt: new Date().toISOString(),
-  };
+  const manifestoCid = await vault.encryptAndVault(manifesto, {
+    name: `${workerId}-manifesto.json`,
+  });
+  console.log(`  ✓ manifesto CID: ${manifestoCid}`);
 
-  try {
-    const cid = await vault.encryptAndVault(fullProfile, {
-      name: `${workerId}-profile-seed.json`,
-    });
+  const preferencesCid = await vault.encryptAndVault(preferences, {
+    name: `${workerId}-preferences.json`,
+  });
+  console.log(`  ✓ preferences CID: ${preferencesCid}`);
 
-    await ensue.updateMemory(`agent/${workerId}/storacha/profile_seed_cid`, cid);
-    console.log(`  ✓ Storacha CID: ${cid}`);
-  } catch (error) {
-    console.warn(`  ⚠ Storacha upload failed (Ensue data is still valid):`, error);
-  }
+  const decisionsCid = await vault.encryptAndVault(decisions, {
+    name: `${workerId}-decisions.json`,
+  });
+  console.log(`  ✓ decisions CID: ${decisionsCid}`);
 
-  console.log(`\n=== Migration complete for ${workerId} ===\n`);
+  const knowledgeCid = await vault.encryptAndVault(knowledge, {
+    name: `${workerId}-knowledge.json`,
+  });
+  console.log(`  ✓ knowledge CID: ${knowledgeCid}`);
+
+  // 5. Store CID pointers in Ensue (NOT plaintext data)
+  console.log('\nStoring CID pointers in Ensue...');
+  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
+  // @ts-ignore — direct path import; package name not resolvable from scripts/
+  const { createEnsueClient } = await import('../shared/dist/index.js');
+  const ensue = createEnsueClient();
+
+  await ensue.updateMemory(`agent/${workerId}/manifesto_cid`, manifestoCid);
+  console.log(`  ✓ agent/${workerId}/manifesto_cid → ${manifestoCid}`);
+
+  await ensue.updateMemory(`agent/${workerId}/preferences_cid`, preferencesCid);
+  console.log(`  ✓ agent/${workerId}/preferences_cid → ${preferencesCid}`);
+
+  await ensue.updateMemory(`agent/${workerId}/decisions_cid`, decisionsCid);
+  console.log(`  ✓ agent/${workerId}/decisions_cid → ${decisionsCid}`);
+
+  await ensue.updateMemory(`agent/${workerId}/knowledge_cid`, knowledgeCid);
+  console.log(`  ✓ agent/${workerId}/knowledge_cid → ${knowledgeCid}`);
+
+  console.log(`\n=== Migration complete for ${workerId} ===`);
+  console.log(`Profile data is now encrypted in Storacha; Ensue has CID pointers only.\n`);
+  console.log('NOTE: Worker delegations must include space/content/decrypt capability for reads.');
+  console.log('If reads fail, recreate delegations with: storacha delegation create <workerDID> --can space/content/decrypt ...');
 }
 
 main().catch(err => {

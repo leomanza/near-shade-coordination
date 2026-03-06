@@ -94,6 +94,13 @@ export function getProposalWorkerKeys(proposalId: string, workerId: string) {
  */
 export const PROPOSAL_INDEX_KEY = 'coordination/proposals/_index';
 
+/**
+ * Coordinator snapshot key — stores a JSON array of worker DIDs participating in a vote.
+ * Taken at vote start to prevent mid-vote registration from changing expected count.
+ */
+export const getCoordinatorSnapshotKey = (proposalId: number | string): string =>
+  `coordination/coordinator/worker_snapshot_${proposalId}`;
+
 /* ─── Agent Registry Keys (persistent, not overwritten per round) ────────── */
 
 /**

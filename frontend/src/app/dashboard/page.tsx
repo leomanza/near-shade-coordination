@@ -48,7 +48,13 @@ export default function PublicDashboard() {
 
   const coordinatorOnline = !healthError && !coordError;
   const proposals = chainState?.proposals ?? [];
-  const workers = chainState?.registeredWorkers?.filter((w) => w.active) ?? [];
+
+  const onChainWorkers = chainState?.registeredWorkers?.filter((w) => w.active) ?? [];
+  const apiWorkers = workerStatuses?.workers 
+    ? Object.keys(workerStatuses.workers).map(id => ({ worker_id: id, active: true, account_id: null as string | null, registered_at: 0, registered_by: '' }))
+    : [];
+  
+  const workers = onChainWorkers.length > 0 ? onChainWorkers : apiWorkers;
 
   return (
     <div className="min-h-screen bg-[#050505] p-6 md:p-10 max-w-6xl mx-auto">

@@ -6,13 +6,12 @@ import {
   getProposalKeys,
   getProposalWorkerKeys,
   getAgentRegistryKeys,
+  getCoordinatorSnapshotKey,
   PROPOSAL_INDEX_KEY,
 } from '@near-shade-coordination/shared';
+import { getAgentDid } from '../storacha/identity';
 import { triggerLocalCoordination } from '../monitor/memory-monitor';
 import { selectJury, verifyJurySelection } from '../vrf/jury-selector';
-import {
-  localGetRegisteredWorkers,
-} from '../contract/local-contract';
 
 const LOCAL_MODE = process.env.LOCAL_MODE === 'true';
 const app = new Hono();
@@ -23,16 +22,43 @@ function getEnsueClient(): EnsueClient {
   return _ensueClient;
 }
 
-/** Get worker IDs from on-chain contract, fall back to WORKERS env or defaults */
-async function getWorkerIds(): Promise<string[]> {
+/**
+ * Query the NEAR registry contract for workers assigned to this coordinator.
+ * Returns structured worker info (DID, endpoint, active status, registration time).
+ */
+async function getRegistryWorkers(): Promise<Array<{
+  did: string;
+  endpoint_url: string;
+  is_active: boolean;
+  registered_at: number;
+}>> {
   try {
-    const registered = await localGetRegisteredWorkers();
-    if (registered.length > 0) {
-      return registered.filter((w: any) => w.active).map((w: any) => w.worker_id);
-    }
+    const { localViewRegistry } = await import('../contract/local-contract');
+    const coordinatorDID = await getAgentDid();
+    const workers = await localViewRegistry<any[]>('get_workers_for_coordinator', {
+      coordinator_did: coordinatorDID,
+    });
+    return (workers ?? []).map(w => ({
+      did: w.worker_did,
+      endpoint_url: w.endpoint_url,
+      is_active: w.is_active,
+      registered_at: w.registered_at,
+    }));
   } catch (e) {
-    console.warn('[coordinate] Could not fetch on-chain workers, falling back to env/defaults');
+    console.warn('[coordinate] Registry query failed, returning empty list:', e);
+    return [];
   }
+}
+
+/**
+ * Get worker DIDs from registry, falling back to WORKERS env for backward compat.
+ */
+async function getWorkerDIDs(): Promise<string[]> {
+  const registryWorkers = await getRegistryWorkers();
+  if (registryWorkers.length > 0) {
+    return registryWorkers.filter(w => w.is_active).map(w => w.did);
+  }
+  // Fallback: parse WORKERS env
   const workersEnv = process.env.WORKERS;
   if (workersEnv) {
     return workersEnv.split(',').map(entry => {
@@ -78,34 +104,62 @@ app.get('/status', async (c) => {
  */
 app.get('/workers', async (c) => {
   try {
-    const workerIds = await getWorkerIds();
-    const statusKeys = workerIds.map(id => getWorkerKeys(id).STATUS);
+    // Try registry-based discovery first
+    const registryWorkers = await getRegistryWorkers();
+
+    if (registryWorkers.length > 0) {
+      // Registry-based response: return full worker info with Ensue status
+      const statusKeys = registryWorkers.map(w => getWorkerKeys(w.did).STATUS);
+      const statuses = await getEnsueClient().readMultiple(statusKeys);
+
+      const workers = registryWorkers.map(w => {
+        const ensueStatus = statuses[getWorkerKeys(w.did).STATUS] || null;
+        return {
+          did: w.did,
+          endpoint_url: w.endpoint_url,
+          is_active: w.is_active,
+          registered_at: w.registered_at,
+          ensue_status: ensueStatus || (w.is_active ? 'idle' : 'offline'),
+        };
+      });
+
+      return c.json({
+        workers,
+        source: 'registry',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    // Fallback: WORKERS env-based discovery
+    const workerDids = await getWorkerDIDs();
+    const statusKeys = workerDids.map(did => getWorkerKeys(did).STATUS);
     const statuses = await getEnsueClient().readMultiple(statusKeys);
 
     const workers: Record<string, string> = {};
-    for (const id of workerIds) {
-      const ensueStatus = statuses[getWorkerKeys(id).STATUS];
+    for (const did of workerDids) {
+      const ensueStatus = statuses[getWorkerKeys(did).STATUS];
       if (ensueStatus) {
-        workers[id] = ensueStatus;
+        workers[did] = ensueStatus;
       } else {
         // No Ensue status — probe the worker's endpoint to check if it's alive
         try {
-          const endpointKey = getAgentRegistryKeys(id).ENDPOINT;
+          const endpointKey = getAgentRegistryKeys(did).ENDPOINT;
           const endpoint = await getEnsueClient().readMemory(endpointKey);
           if (endpoint) {
             const res = await fetch(`${endpoint}/`, { signal: AbortSignal.timeout(3000) });
             if (res.ok) {
-              workers[id] = 'idle';
+              workers[did] = 'idle';
               continue;
             }
           }
         } catch { /* probe failed */ }
-        workers[id] = 'offline';
+        workers[did] = 'offline';
       }
     }
 
     return c.json({
       workers,
+      source: 'env_fallback',
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
@@ -208,10 +262,10 @@ app.post('/reset', async (c) => {
     // Clear coordinator memory
     await getEnsueClient().clearPrefix('coordination/coordinator/');
 
-    // Reset all worker statuses
-    const workerIds = await getWorkerIds();
+    // Reset all worker statuses (by DID)
+    const workerDids = await getWorkerDIDs();
     await Promise.all(
-      workerIds.map(id => getEnsueClient().updateMemory(getWorkerKeys(id).STATUS, 'idle'))
+      workerDids.map(did => getEnsueClient().updateMemory(getWorkerKeys(did).STATUS, 'idle'))
     );
 
     return c.json({
@@ -294,10 +348,19 @@ app.get('/proposals/:id', async (c) => {
     const tally = tallyStr ? JSON.parse(tallyStr) : null;
     const config = configStr ? (() => { try { return JSON.parse(configStr); } catch { return configStr; } })() : null;
 
-    // Fetch per-worker results
-    const workerIds = await getWorkerIds();
+    // Fetch per-worker results — read snapshot for this proposal, fall back to registry
+    // getCoordinatorSnapshotKey imported at top level
+    let workerDidsForProposal: string[] = [];
+    const snapshotStr = await getEnsueClient().readMemory(getCoordinatorSnapshotKey(proposalId));
+    if (snapshotStr) {
+      try { workerDidsForProposal = JSON.parse(snapshotStr); } catch { /* ignore */ }
+    }
+    if (workerDidsForProposal.length === 0) {
+      workerDidsForProposal = await getWorkerDIDs();
+    }
+
     const workerResults: Record<string, any> = {};
-    for (const workerId of workerIds) {
+    for (const workerId of workerDidsForProposal) {
       const wKeys = getProposalWorkerKeys(proposalId, workerId);
       const [resultStr, timestamp] = await Promise.all([
         getEnsueClient().readMemory(wKeys.RESULT),

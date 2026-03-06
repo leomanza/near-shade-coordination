@@ -976,3 +976,81 @@ Potential enhancements:
 ---
 
 **Ready to implement**: This plan builds on proven patterns from your existing Shade Agent projects and follows the architecture established in your pre-research on NEAR AI DAO and Ensue memory networks.
+
+---
+
+## Permissionless Workers — Model A
+**Status: ✅ Complete**
+
+Evolution from hardcoded `worker1/2/3` to a permissionless protocol where any agent can pay a 0.1 NEAR deposit, self-register under a coordinator, and immediately start receiving proposals. Worker discovery is dynamic: coordinator queries the registry at runtime, takes a DID snapshot per vote.
+
+### What Changed
+
+#### Registry Contract (`registry-contract/src/lib.rs`)
+- New DID-keyed structs: `WorkerRecord { account_id, coordinator_did, worker_did, endpoint_url, cvm_id, registered_at, is_active }`, `CoordinatorRecord`
+- New storage ordinals: 4=`WorkersByDid`, 5=`CoordinatorsByDid` (ordinals 0-3 deprecated as placeholders)
+- New view methods: `get_workers_for_coordinator(coordinator_did)`, `get_worker_by_did(worker_did)`, `get_coordinator_by_did(coordinator_did)`
+- Registration deposit stays at **0.1 NEAR** (not 0.7 as old CLAUDE.md said)
+
+#### Coordinator Contract (`coordinator-contract/src/lib.rs`)
+- `start_coordination` now takes `expected_worker_count: u8` and `quorum: u8`
+- `record_worker_submissions` replaced per-worker-ID check with count check: `submissions.len() == expected_worker_count`
+- `Proposal` struct has new `expected_worker_count` and `quorum` fields
+
+#### Shared Library (`shared/src/`)
+- **`did-utils.ts`** (new) — `deriveDidFromPrivateKey(key)` + cached `getCoordinatorDID()` using dynamic `import('@storacha/client/principal/ed25519')` (ESM-safe)
+- **`constants.ts`** — added `getCoordinatorSnapshotKey(proposalId)`
+
+#### Coordinator Agent (`coordinator-agent/`)
+- `memory-monitor.ts` — `getActiveWorkers()` queries registry; fallback to `WORKERS` env; snapshot of worker DIDs stored per proposal; quorum-aware tally; `voting_config` per-proposal override
+- `contract/local-contract.ts` — added `localViewRegistry`, `localCallRegistry`, `localRegisterCoordinator`
+- `routes/coordinate.ts` — `GET /workers` returns DID-keyed registry list with Ensue status overlay; `source: 'registry'|'env_fallback'`
+- `index.ts` — `ensureCoordinatorRegistered()` on startup (non-blocking)
+- `.env.development.local` — removed `WORKERS`, added `REGISTRY_CONTRACT_ID`, `COORDINATOR_ENDPOINT_URL`, `MIN_WORKERS=1`, `MAX_WORKERS=10`
+
+#### Worker Agent (`worker-agent/`)
+- `task-handler.ts` — removed `WORKER_ID`; DID derived async from `STORACHA_AGENT_PRIVATE_KEY` via `getAgentDid()`; `ensureRegistered()` on startup calls registry; all Ensue paths keyed by DID
+- `index.ts` — health check returns `workerDid`; no `WORKER_ID` required
+- `.env.worker{1,2,3}.local` — removed `WORKER_ID`, added `COORDINATOR_DID`, `WORKER_ENDPOINT_URL`, `REGISTRY_CONTRACT_ID`, `NEAR_ACCOUNT_ID`, `NEAR_SEED_PHRASE`, `PHALA_CVM_ID`
+
+#### Frontend + run-dev.sh
+- `run-dev.sh` — `WORKER_COUNT=${WORKER_COUNT:-3}` configurable; `DOTENV_CONFIG_PATH=.env.workerN.local` loop replaces hardcoded 1-2-3
+- `src/lib/api.ts` — `getWorkerStatuses` and `getRegisteredWorkers` normalize registry DID response; backward compat with env-fallback format
+- `src/app/coordinator/page.tsx` — `truncateDid()` helper; worker cards show `z6MkuLv3…qYv` with full DID on hover
+
+### Permissionless Participation Flow
+```
+New worker startup:
+  1. Derive DID from STORACHA_AGENT_PRIVATE_KEY (did:key:z6Mk...)
+  2. nearViewCall registry.get_worker_by_did → not found
+  3. account.functionCall registry.register_worker (0.1 NEAR deposit)
+  4. Set idle status on DID-keyed Ensue path
+  5. Start polling loop
+
+Next coordinator vote:
+  1. getActiveWorkers() queries registry, snapshot includes new worker
+  2. Coordinator stores DID list in coordination/coordinator/worker_snapshot_{N}
+  3. start_coordination(taskConfig, workers.length, quorum) sent on-chain
+  4. All snapshotted workers triggered; new worker votes without restart
+```
+
+### Per-Proposal Quorum Configuration
+```json
+{
+  "type": "vote",
+  "parameters": {
+    "proposal": "Fund developer education",
+    "voting_config": { "min_workers": 2, "quorum": 2 }
+  }
+}
+```
+`quorum` = minimum approvals required. Default: strict majority (`floor(N/2) + 1`). Stored in `Proposal` struct for on-chain auditability but enforced in coordinator agent (privacy model).
+
+### Verification Checklist
+- [ ] Registry contract WASM rebuilt + deployed to `registry.agents-coordinator.testnet`
+- [ ] Coordinator contract WASM rebuilt + deployed to `coordinator.agents-coordinator.testnet`
+- [ ] `WORKER_COUNT=2 ./run-dev.sh` — vote completes with 2 workers
+- [ ] Start 3rd worker mid-run → next vote snapshot includes it
+- [ ] `curl localhost:3000/api/coordinate/workers` returns `source: 'registry'` with DIDs
+- [ ] Frontend coordinator page shows truncated DIDs
+- [ ] `voting_config.quorum=2` override works per proposal

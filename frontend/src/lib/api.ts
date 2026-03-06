@@ -59,8 +59,9 @@ export async function ensureAgentEndpoints(): Promise<void> {
 }
 
 export interface WorkerStatuses {
-  workers: Record<string, string>;
+  workers: Record<string, string>; // keyed by DID (or legacy worker name)
   timestamp: string;
+  source?: "registry" | "env_fallback";
 }
 
 export interface CoordinatorStatus {
@@ -119,7 +120,20 @@ export async function getCoordinatorStatus(): Promise<CoordinatorStatus | null> 
 }
 
 export async function getWorkerStatuses(): Promise<WorkerStatuses | null> {
-  return safeFetch<WorkerStatuses>(`${getCoordinatorUrl()}/api/coordinate/workers`);
+  const raw = await safeFetch<any>(`${getCoordinatorUrl()}/api/coordinate/workers`);
+  if (!raw) return null;
+
+  // Registry-based response: workers is an array with DID + ensue_status
+  if (raw.source === "registry" && Array.isArray(raw.workers)) {
+    const workers: Record<string, string> = {};
+    for (const w of raw.workers) {
+      workers[w.did] = w.ensue_status || (w.is_active ? "idle" : "offline");
+    }
+    return { workers, timestamp: raw.timestamp, source: "registry" };
+  }
+
+  // Legacy env-fallback response: workers is already Record<string, string>
+  return { workers: raw.workers ?? {}, timestamp: raw.timestamp, source: "env_fallback" };
 }
 
 export async function getPendingCoordinations(): Promise<PendingCoordinations | null> {
@@ -209,15 +223,48 @@ export async function triggerWorkerTask(
 // ── Worker Registration (protocol API → on-chain) ──
 
 export interface RegisteredWorker {
-  worker_id: string;
+  worker_id: string;   // DID (did:key:z6Mk...) in permissionless mode, legacy name in fallback
   account_id: string | null;
   registered_at: number;
   registered_by: string;
   active: boolean;
 }
 
+/**
+ * Get registered workers — queries coordinator's /api/coordinate/workers (registry-backed).
+ * Falls back to env-based discovery if registry is unavailable.
+ */
 export async function getRegisteredWorkers(): Promise<{ workers: RegisteredWorker[]; activeCount: number } | null> {
-  return safeFetch(`${API_URL}/api/workers/registered`);
+  const raw = await safeFetch<any>(`${getCoordinatorUrl()}/api/coordinate/workers`);
+  if (!raw) return null;
+
+  // Registry-based response
+  if (raw.source === "registry" && Array.isArray(raw.workers)) {
+    const workers: RegisteredWorker[] = raw.workers.map((w: any) => ({
+      worker_id: w.did,
+      account_id: null,
+      registered_at: w.registered_at ?? 0,
+      registered_by: "",
+      active: w.is_active,
+    }));
+    return { workers, activeCount: workers.filter((w) => w.active).length };
+  }
+
+  // Env-fallback response: workers is Record<string, string>
+  if (raw.workers && typeof raw.workers === "object" && !Array.isArray(raw.workers)) {
+    const workers: RegisteredWorker[] = Object.entries(raw.workers as Record<string, string>).map(
+      ([id, status]) => ({
+        worker_id: id,
+        account_id: null,
+        registered_at: 0,
+        registered_by: "",
+        active: status !== "offline",
+      })
+    );
+    return { workers, activeCount: workers.filter((w) => w.active).length };
+  }
+
+  return null;
 }
 
 export async function registerWorker(

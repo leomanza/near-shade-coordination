@@ -233,7 +233,7 @@ function CoordinatorContent() {
           return (
             <div key={w.worker_id} className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
               <StatusDot status={workerError ? "offline" : status} />
-              <span>{w.worker_id}</span>
+              <span title={w.worker_id}>{truncateDid(w.worker_id)}</span>
             </div>
           );
         })}
@@ -293,6 +293,16 @@ function CoordinatorContent() {
   );
 }
 
+/* ─── DID Display Helper ─────────────────────────────────────────────── */
+
+function truncateDid(id: string): string {
+  if (id.startsWith("did:key:")) {
+    const key = id.slice("did:key:".length);
+    return `${key.slice(0, 8)}…${key.slice(-4)}`;
+  }
+  return id;
+}
+
 /* ─── Minimal Worker Status Card ─────────────────────────────────────── */
 
 function WorkerStatusCard({
@@ -308,8 +318,8 @@ function WorkerStatusCard({
         <div className="flex items-center gap-3">
           <StatusDot status={status} />
           <div>
-            <h3 className="text-sm font-semibold text-zinc-100 font-mono">
-              {worker.worker_id}
+            <h3 className="text-sm font-semibold text-zinc-100 font-mono" title={worker.worker_id}>
+              {truncateDid(worker.worker_id)}
             </h3>
             {worker.account_id && (
               <p className="text-[10px] text-zinc-600 font-mono truncate max-w-[150px]">

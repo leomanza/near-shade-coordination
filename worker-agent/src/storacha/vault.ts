@@ -11,6 +11,7 @@
  *   STORACHA_AGENT_PRIVATE_KEY  — Ed25519 private key (from `storacha key create`)
  *   STORACHA_DELEGATION_PROOF   — Base64-encoded UCAN delegation CAR
  *   STORACHA_SPACE_DID           — (optional) Space DID
+ *   STORACHA_GATEWAY_URL         — (optional) Primary gateway URL (default: https://storacha.link)
  *   LIT_NETWORK                  — Lit network name (default: nagaDev)
  */
 
@@ -18,52 +19,78 @@ import { createStorachaClient } from './identity';
 
 const WORKER_ID = process.env.WORKER_ID || 'worker1';
 
-// Cached instances
-let _encryptedClient: any = null;
-let _litClient: any = null;
+/**
+ * IPFS gateways for CID retrieval, in priority order.
+ * The primary is configurable via env var; fallbacks are tried on failure.
+ */
+const PRIMARY_GATEWAY = process.env.STORACHA_GATEWAY_URL || 'https://storacha.link';
+const FALLBACK_GATEWAYS = [
+  'https://w3s.link',
+  'https://dweb.link',
+  'https://ipfs.io',
+];
+
+/** Max retries per gateway before moving to the next one. */
+const RETRIES_PER_GATEWAY = 2;
+/** Delay between retries on the same gateway (ms). */
+const RETRY_DELAY_MS = 1500;
+
+// Cached instances (use promise-based singletons for concurrent access)
+let _encryptedClientPromise: Promise<any> | null = null;
+let _litClientPromise: Promise<any> | null = null;
 let _authManager: any = null;
 
-// Lazy-loaded ESM modules
-let _eucCreate: any = null;
-let _litFactory: any = null;
-let _createLitClient: any = null;
-let _createAuthManager: any = null;
-let _nagaDev: any = null;
-let _storagePlugins: any = null;
+// Lazy-loaded ESM modules (promise-based singleton to prevent race conditions)
+let _modules: {
+  eucCreate: any;
+  litFactory: any;
+  createLitClient: any;
+  createAuthManager: any;
+  nagaDev: any;
+  storagePlugins: any;
+} | null = null;
+let _loadPromise: Promise<any> | null = null;
 
 async function loadModules() {
-  if (!_eucCreate) {
-    const euc = await import('@storacha/encrypt-upload-client');
-    _eucCreate = euc.create;
+  if (_modules) return _modules;
+  if (!_loadPromise) {
+    _loadPromise = (async () => {
+      const euc = await import('@storacha/encrypt-upload-client');
+      const factories = await import(
+        '@storacha/encrypt-upload-client/factories.node' as any
+      );
+      const litClient = await import('@lit-protocol/lit-client');
+      const litAuth = await import('@lit-protocol/auth');
+      const networks = await import('@lit-protocol/networks');
 
-    const factories = await import(
-      '@storacha/encrypt-upload-client/factories.node' as any
-    );
-    _litFactory = factories.createGenericLitAdapter;
-
-    const litClient = await import('@lit-protocol/lit-client');
-    _createLitClient = litClient.createLitClient;
-
-    const litAuth = await import('@lit-protocol/auth');
-    _createAuthManager = litAuth.createAuthManager;
-    _storagePlugins = litAuth.storagePlugins;
-
-    const networks = await import('@lit-protocol/networks');
-    _nagaDev = networks.nagaDev;
+      _modules = {
+        eucCreate: euc.create,
+        litFactory: factories.createGenericLitAdapter,
+        createLitClient: litClient.createLitClient,
+        createAuthManager: litAuth.createAuthManager,
+        nagaDev: networks.nagaDev,
+        storagePlugins: litAuth.storagePlugins,
+      };
+      return _modules;
+    })();
   }
+  return _loadPromise;
 }
 
 /**
  * Get or create the Lit Protocol client (connects to network).
  */
 async function getLitClient() {
-  if (_litClient) return _litClient;
-  await loadModules();
-
-  console.log(`[vault:${WORKER_ID}] Connecting to Lit Protocol network...`);
-  _litClient = await _createLitClient({ network: _nagaDev });
-  console.log(`[vault:${WORKER_ID}] Lit client connected`);
-  return _litClient;
+  if (!_litClientPromise) {
+    _litClientPromise = (async () => {
+      const mods = await loadModules();
+      console.log(`[vault:${WORKER_ID}] Connecting to Lit Protocol network...`);
+      const client = await mods!.createLitClient({ network: mods!.nagaDev });
+      console.log(`[vault:${WORKER_ID}] Lit client connected`);
+      return client;
+    })();
+  }
+  return _litClientPromise;
 }
 
 /**
@@ -71,10 +98,10 @@ async function getLitClient() {
  */
 async function getAuthManager() {
   if (_authManager) return _authManager;
-  await loadModules();
+  const mods = await loadModules();
 
-  _authManager = _createAuthManager({
-    storage: _storagePlugins.localStorageNode({
+  _authManager = mods!.createAuthManager({
+    storage: mods!.storagePlugins.localStorageNode({
       appName: `delibera-${WORKER_ID}`,
       networkName: 'naga-dev',
       storagePath: `./.lit-auth-storage-${WORKER_ID}`,
@@ -84,24 +111,35 @@ async function getAuthManager() {
 }
 
 /**
- * Get or create the encrypted Storacha client (with Lit crypto adapter).
+ * Create an encrypted Storacha client pointing at a specific IPFS gateway.
  */
-export async function getEncryptedClient() {
-  if (_encryptedClient) return _encryptedClient;
-
+async function createEncryptedClientForGateway(gatewayUrl: string) {
+  const mods = await loadModules();
   const storachaClient = await createStorachaClient();
   const litClient = await getLitClient();
   const authManager = await getAuthManager();
 
-  const cryptoAdapter = _litFactory(litClient, authManager);
+  const cryptoAdapter = mods!.litFactory(litClient, authManager);
 
-  _encryptedClient = await _eucCreate({
+  return mods!.eucCreate({
     storachaClient,
     cryptoAdapter,
+    gatewayURL: new URL(gatewayUrl),
   });
+}
 
-  console.log(`[vault:${WORKER_ID}] Encrypted client ready (Lit + Storacha)`);
-  return _encryptedClient;
+/**
+ * Get or create the primary encrypted Storacha client (with Lit crypto adapter).
+ */
+export async function getEncryptedClient() {
+  if (!_encryptedClientPromise) {
+    _encryptedClientPromise = (async () => {
+      const client = await createEncryptedClientForGateway(PRIMARY_GATEWAY);
+      console.log(`[vault:${WORKER_ID}] Encrypted client ready (Lit + Storacha, gateway: ${PRIMARY_GATEWAY})`);
+      return client;
+    })();
+  }
+  return _encryptedClientPromise;
 }
 
 /**
@@ -146,39 +184,23 @@ export async function encryptAndVault(
   return cid.toString();
 }
 
+/** Sleep helper for retry delays. */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /**
- * Retrieve and decrypt a previously vaulted object from Storacha.
- *
- * @param cidString - The CID string returned by encryptAndVault()
- * @param wallet - viem Account for Lit auth (private key account)
- * @param decryptDelegation - UCAN delegation proof with space/content/decrypt capability
- * @returns The decrypted data as a parsed JSON object
+ * Attempt to retrieve + decrypt a CID using a specific encrypted client.
+ * Returns the decrypted JSON or throws on failure.
  */
-export async function retrieveAndDecrypt(
+async function tryRetrieveAndDecrypt(
+  encryptedClient: any,
   cidString: string,
-  wallet: any,
-  decryptDelegation: any
+  decryptionConfig: any,
 ): Promise<unknown> {
-  const encryptedClient = await getEncryptedClient();
-  const storachaClient = await createStorachaClient();
-
-  const currentSpace = storachaClient.currentSpace();
-  if (!currentSpace) {
-    throw new Error(`[vault:${WORKER_ID}] No current space set on Storacha client`);
-  }
-
-  // Parse CID
   const { CID } = await import('multiformats/cid');
   const cid = CID.parse(cidString);
 
-  const decryptionConfig = {
-    decryptDelegation,
-    spaceDID: currentSpace.did(),
-    proofs: storachaClient.proofs(),
-    wallet,
-  };
-
-  console.log(`[vault:${WORKER_ID}] Retrieving and decrypting CID: ${cidString}`);
   const { stream, fileMetadata } =
     await encryptedClient.retrieveAndDecryptFile(cid, decryptionConfig);
 
@@ -192,7 +214,7 @@ export async function retrieveAndDecrypt(
   }
 
   const combined = new Uint8Array(
-    chunks.reduce((acc, c) => acc + c.length, 0)
+    chunks.reduce((acc: number, c: Uint8Array) => acc + c.length, 0)
   );
   let offset = 0;
   for (const chunk of chunks) {
@@ -208,6 +230,78 @@ export async function retrieveAndDecrypt(
   } catch {
     return text;
   }
+}
+
+/**
+ * Retrieve and decrypt a previously vaulted object from Storacha.
+ *
+ * Tries the primary gateway first, then falls back to alternative IPFS gateways
+ * if retrieval fails (e.g. 520 errors, corrupt CAR data, timeouts).
+ *
+ * @param cidString - The CID string returned by encryptAndVault()
+ * @param wallet - viem Account for Lit auth (private key account)
+ * @param decryptDelegation - UCAN delegation proof with space/content/decrypt capability
+ * @returns The decrypted data as a parsed JSON object
+ */
+export async function retrieveAndDecrypt(
+  cidString: string,
+  wallet: any,
+  decryptDelegation: any
+): Promise<unknown> {
+  const storachaClient = await createStorachaClient();
+
+  const currentSpace = storachaClient.currentSpace();
+  if (!currentSpace) {
+    throw new Error(`[vault:${WORKER_ID}] No current space set on Storacha client`);
+  }
+
+  const decryptionConfig = {
+    decryptDelegation,
+    spaceDID: currentSpace.did(),
+    proofs: storachaClient.proofs(),
+    wallet,
+  };
+
+  // Build ordered list of gateways to try: primary + fallbacks (deduplicated)
+  const allGateways = [PRIMARY_GATEWAY, ...FALLBACK_GATEWAYS.filter(g => g !== PRIMARY_GATEWAY)];
+  const errors: Array<{ gateway: string; error: string }> = [];
+
+  for (const gateway of allGateways) {
+    for (let attempt = 1; attempt <= RETRIES_PER_GATEWAY; attempt++) {
+      try {
+        console.log(
+          `[vault:${WORKER_ID}] Retrieving CID ${cidString} via ${gateway}` +
+          (attempt > 1 ? ` (attempt ${attempt}/${RETRIES_PER_GATEWAY})` : '')
+        );
+
+        // Use primary cached client for primary gateway, fresh client for fallbacks
+        const client = gateway === PRIMARY_GATEWAY
+          ? await getEncryptedClient()
+          : await createEncryptedClientForGateway(gateway);
+
+        return await tryRetrieveAndDecrypt(client, cidString, decryptionConfig);
+      } catch (err: any) {
+        const errMsg = err?.message || String(err);
+        errors.push({ gateway, error: errMsg });
+        console.warn(
+          `[vault:${WORKER_ID}] Gateway ${gateway} failed (attempt ${attempt}/${RETRIES_PER_GATEWAY}): ${errMsg.slice(0, 120)}`
+        );
+
+        // Don't delay after the last attempt on the last gateway
+        const isLastGateway = gateway === allGateways[allGateways.length - 1];
+        const isLastAttempt = attempt === RETRIES_PER_GATEWAY;
+        if (!(isLastGateway && isLastAttempt)) {
+          await sleep(RETRY_DELAY_MS);
+        }
+      }
+    }
+  }
+
+  // All gateways exhausted
+  const summary = errors.map(e => `  ${e.gateway}: ${e.error.slice(0, 100)}`).join('\n');
+  throw new Error(
+    `[vault:${WORKER_ID}] All gateways failed for CID ${cidString}:\n${summary}`
+  );
 }
 
 /**

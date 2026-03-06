@@ -130,18 +130,19 @@ near-shade-coordination/
 
 ---
 
-## Running Locally (V1 — still works)
+## Running Locally
 
 ```bash
-./run-dev.sh   # coordinator :3000, workers :3001-3003, frontend :3004
+./run-dev.sh              # coordinator :3000, workers :3001-3003, frontend :3004
+WORKER_COUNT=2 ./run-dev.sh   # run only 2 workers (permissionless: add more later)
 
-# Trigger a vote:
+# Trigger a vote (with per-proposal quorum config):
 curl -X POST http://localhost:3000/api/coordinate/trigger \
   -H 'Content-Type: application/json' \
-  -d '{"taskConfig":"{\"type\":\"vote\",\"parameters\":{\"proposal\":\"Fund a developer education program\"}}"}'
+  -d '{"taskConfig":{"type":"vote","parameters":{"proposal":"Fund a developer education program","voting_config":{"min_workers":2,"quorum":2}}}}'
 
 curl http://localhost:3000/api/coordinate/status
-curl http://localhost:3000/api/coordinate/workers
+curl http://localhost:3000/api/coordinate/workers   # returns DID-keyed worker list
 ```
 
 ---
@@ -160,7 +161,10 @@ NEAR_ACCOUNT_ID=agents-coordinator.testnet
 NEAR_SEED_PHRASE=...
 NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
 NEAR_API_KEY=...
-WORKERS=worker1:3001,worker2:3002,worker3:3003
+REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
+COORDINATOR_ENDPOINT_URL=http://localhost:3000
+MIN_WORKERS=1             # minimum workers before accepting a proposal
+MAX_WORKERS=10
 PINGPAY_API_KEY=...
 PINGPAY_API_URL=https://pay.pingpay.io/api
 PINGPAY_WEBHOOK_SECRET=...
@@ -168,7 +172,7 @@ PINGPAY_WEBHOOK_SECRET=...
 AGENT_CONTRACT_ID=coordinator.agents-coordinator.testnet
 SPONSOR_ACCOUNT_ID=agents-coordinator.testnet
 SPONSOR_PRIVATE_KEY=...
-# [V2] Storacha
+# [V2] Storacha (DID derived from this key is the coordinator's sovereign identity)
 STORACHA_AGENT_PRIVATE_KEY=...         # from: storacha key create
 STORACHA_DELEGATION_PROOF=...          # from: storacha delegation create <DID> --base64
 STORACHA_SPACE_DID=...                 # (optional) from: storacha space create
@@ -179,15 +183,21 @@ LIT_NETWORK=datil
 FILECOIN_ONCHAIN_API_KEY=...
 ```
 
-### worker-agent/.env.worker1.local
+### worker-agent/.env.worker1.local (permissionless — no WORKER_ID needed)
 ```
-WORKER_ID=worker1
 PORT=3001
 NEAR_NETWORK=testnet
 ENSUE_API_KEY=...
 ENSUE_TOKEN=...
 NEAR_API_KEY=...
-# Storacha worker identity (unique key + delegation per worker instance)
+# Self-registration: worker pays 0.1 NEAR deposit to join coordinator's pool
+COORDINATOR_DID=did:key:z6Mk...        # coordinator's sovereign DID (from coordinator startup log)
+WORKER_ENDPOINT_URL=http://localhost:3001
+NEAR_ACCOUNT_ID=worker1.agents-coordinator.testnet   # pays registration deposit
+NEAR_SEED_PHRASE=...
+PHALA_CVM_ID=local
+REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
+# Storacha worker identity (sovereign DID derived from this key)
 STORACHA_AGENT_PRIVATE_KEY=...         # from: storacha key create (unique per worker)
 STORACHA_DELEGATION_PROOF=...          # from: storacha delegation create <WORKER_DID> --base64
 STORACHA_SPACE_DID=...                 # shared Delibera space DID
@@ -211,32 +221,41 @@ FLOW_PRIVATE_KEY=...
 | Contract calls | `near-api-js` with seed phrase | Shade Agent SDK + DCAP attestation |
 | Worker trigger | HTTP POST to workers | Write `STATUS=pending` to Ensue; workers self-poll |
 | TEE | None | Phala Intel TDX |
-| Registry check | Skipped | Required |
+| Registry check | `localViewRegistry` + `localRegisterCoordinator` | Required |
+| Worker discovery | Registry → fallback to `WORKERS` env | Registry only |
 
 **Critical (Phala/non-LOCAL_MODE):** Workers MUST poll Ensue (`workerKeys.STATUS`) every 3s via `startWorkerPollingLoop()`. Coordinator only writes `STATUS='pending'` — it does NOT HTTP-call workers.
 
 ---
 
-## The Voting Flow — V1 (End-to-End, unchanged)
+## The Voting Flow (Permissionless, Model A)
 
-1. User calls `start_coordination(task_config)` on NEAR contract
+1. User calls `start_coordination(task_config, expected_worker_count, quorum)` on NEAR contract
 2. Contract creates a **yielded promise** (~200 block timeout)
-3. Coordinator polls contract every 5s for `Created` proposals
-4. Coordinator writes task config to Ensue (`coordination/config/task_definition`)
-5. Coordinator sets worker status keys to `pending`
-6. Each worker independently:
+3. Coordinator queries registry: `get_workers_for_coordinator(coordinatorDID)` → takes snapshot
+4. Coordinator stores snapshot DID list: `coordination/coordinator/worker_snapshot_{proposalId}`
+5. Coordinator writes task config to Ensue (`coordination/config/task_definition`)
+6. Coordinator sets DID-keyed status to `pending` for each snapshotted worker
+7. Each worker independently (identified by `did:key:z6Mk...`):
    - Fetches DAO manifesto from contract (RPC view call)
    - Calls NEAR AI (DeepSeek-V3.1) via `dao_vote` tool
    - Gets NEAR AI verification proof (ECDSA-signed attestation)
-   - Writes `{vote, reasoning}` to `coordination/tasks/workerN/result`
-   - Sets `coordination/tasks/workerN/status = "completed"`
-7. Coordinator detects all workers done (120s timeout)
-8. Coordinator reads all votes, tallies Approved vs Rejected
-9. Calls `record_worker_submissions` on-chain (nullifier hashes)
-10. Calls `coordinator_resume` with ONLY `{approved, rejected, decision, workerCount}`
-11. Contract validates hashes, resumes yield, stores finalized result
+   - Writes `{vote, reasoning}` to `coordination/tasks/{workerDID}/result`
+   - Sets `coordination/tasks/{workerDID}/status = "completed"`
+8. Coordinator detects all snapshotted workers done (120s timeout, quorum-aware)
+9. Coordinator reads all votes, tallies Approved vs Rejected
+10. Calls `record_worker_submissions` on-chain (count check, not per-ID validation)
+11. Calls `coordinator_resume` with ONLY `{approved, rejected, decision, workerCount}`
+12. Contract validates count, resumes yield, stores finalized result
 
 **Privacy guarantee:** Individual votes + reasoning stay in Ensue only.
+
+**Permissionless participation:** Any agent can pay 0.1 NEAR to `register_worker(coordinatorDID, workerDID, endpointUrl, cvmId)` and begin receiving proposals without coordinator restart.
+
+**Quorum configuration** (per-proposal override via `voting_config`):
+```json
+{ "type": "vote", "parameters": { "proposal": "...", "voting_config": { "min_workers": 2, "quorum": 2 } } }
+```
 
 ---
 
@@ -259,9 +278,15 @@ V1 flow remains available for standard proposals.
 
 | Tier | System | Data | Lifetime |
 |---|---|---|---|
-| Hot | Ensue Memory Network | Real-time task state, agent working memory | Session |
-| Warm | Storacha (UCAN-authorized) | Session summaries, agent preferences, encrypted transcripts | Persistent |
+| Hot | Ensue Memory Network | Real-time coordination state, CID pointers | Session |
+| Warm | Storacha (UCAN-authorized) | **Agent persistent memory**: manifesto, preferences, decisions, knowledge | Persistent |
 | Cold | Filecoin Onchain Cloud | Finalized deliberation records, Proof of Spacetime | Permanent |
+
+**Key concept:** Storacha is the agent's **persistent memory**, not just a backup tier.
+Each agent accumulates knowledge, preferences, and values over time. Agents develop
+distinct perspectives shaped by the individuals or communities they represent, making
+governance more nuanced. Memory is read at deliberation START and updated at END.
+Humans with UCAN permissions can also inject knowledge into an agent's Storacha space.
 
 **Sync rule:** When a deliberation cycle completes, Ensue knowledge tree MUST be serialized and backed up to Storacha. This is handled by the `ensue-backup` skill and triggered automatically every 50 agent turns.
 
@@ -269,39 +294,55 @@ V1 flow remains available for standard proposals.
 
 ## Worker Persistent Identity (Storacha-backed)
 
-Each worker agent has a persistent identity that accumulates across restarts:
+Each worker agent has a **persistent identity that is its memory** — not just an archive.
+Agents accumulate knowledge, preferences, and values over time, developing distinct
+perspectives shaped by the individuals or communities they represent. This makes
+governance more nuanced and authentic.
+
+**Core principle:** Storacha IS the agent's memory. It is read at the START of each
+deliberation (informing AI reasoning) and updated at the END (capturing new learnings).
+Humans with UCAN permissions over a worker's Storacha space can also feed knowledge
+to agents between deliberations.
 
 **Architecture:**
 - `StorachaProfileClient` (`worker-agent/src/storacha/profile-client.ts`) — singleton, session-cached
-- Profile data (manifesto, weights) sourced from `config/profiles.json` seed file
-- Decision history persisted to **Ensue** (`agent/{workerId}/decisions`) as primary store
-- Encrypted backup to **Storacha** via `vault.ts` on each vote (returns CID)
-- Knowledge notes stored in Ensue (`agent/{workerId}/knowledge`)
+- Storacha = PRIMARY persistent store (all profile data encrypted via Lit + Storacha)
+- Ensue = CID pointers ONLY (`agent/{workerId}/manifesto_cid`, etc.) + real-time coordination state
+- Per-worker Storacha spaces for isolation and sovereignty
 
-**Ensue keys for persistent identity:**
+**Per-worker Storacha spaces (provisioned):**
+| Worker | Space Name | Space DID |
+|--------|------------|-----------|
+| worker1 | delibera-worker1 | `did:key:z6MkfsyAPYQ7uyPSvASA6SpbjR24px35KB5zk5W8556umbK9` |
+| worker2 | delibera-worker2 | `did:key:z6Mkovsb6rneiFNKNvPyksvLjWxkg5mwfQ8jSK1zgPamVpnF` |
+| worker3 | delibera-worker3 | `did:key:z6MknVJzCLxyk2M8XQitmfzdZv6KdeVHkFhaNvHZPieCfFHt` |
+
+**Ensue keys (CID pointers only):**
 ```
-agent/{workerId}/manifesto          # AgentManifesto JSON
-agent/{workerId}/preferences        # AgentPreferences JSON (voting weights)
-agent/{workerId}/decisions          # DecisionRecord[] JSON (last 20)
-agent/{workerId}/knowledge          # string[] JSON (knowledge notes)
-agent/{workerId}/storacha/decisions_cid   # CID of latest encrypted Storacha backup
-agent/{workerId}/storacha/knowledge_cid   # CID of latest encrypted Storacha backup
+agent/{workerId}/manifesto_cid      # CID → encrypted AgentManifesto in Storacha
+agent/{workerId}/preferences_cid    # CID → encrypted AgentPreferences in Storacha
+agent/{workerId}/decisions_cid      # CID → encrypted DecisionRecord[] in Storacha (last 20)
+agent/{workerId}/knowledge_cid      # CID → encrypted string[] in Storacha (knowledge notes)
 ```
 
 **Fallback:** When `STORACHA_AGENT_PRIVATE_KEY` is not set, falls back to `profiles.json` + in-memory decisions (LOCAL_MODE compatible).
 
-**Migration:** Run `scripts/migrate-profiles-to-storacha.ts --worker workerN` with each worker's env to seed Ensue + Storacha from `profiles.json`.
+**Migration:** Run `scripts/migrate-profiles-to-storacha.ts --worker workerN` with each worker's env to seed Storacha from `profiles.json`.
 
 **Call flow:**
 ```
 task-handler.ts → loadIdentity() → StorachaProfileClient.loadIdentity()
-                                    ├── getManifesto()  → profiles.json seed (cached)
-                                    ├── getPreferences() → profiles.json seed (cached)
-                                    └── getRecentDecisions() → Ensue key (cached)
+                                    ├── getManifesto()     → Ensue CID → retrieveAndDecrypt() → AgentManifesto
+                                    ├── getPreferences()   → Ensue CID → retrieveAndDecrypt() → AgentPreferences
+                                    ├── getRecentDecisions() → Ensue CID → retrieveAndDecrypt() → DecisionRecord[]
+                                    └── getKnowledgeNotes()  → Ensue CID → retrieveAndDecrypt() → string[]
                → recordDecision() → StorachaProfileClient.saveDecision()
-                                    ├── Ensue write (primary)
-                                    └── encryptAndVault() → Storacha (backup)
+                                    ├── encryptAndVault(updated_decisions) → Storacha → CID
+                                    └── ensue.updateMemory(`agent/{did}/decisions_cid`, cid)
 ```
+
+**Human knowledge injection:** Anyone with UCAN delegation to a worker's space can upload
+encrypted knowledge and update the CID pointer, feeding context to the agent.
 
 ---
 
@@ -316,13 +357,15 @@ storacha key create
 # → Private key: MgCZG7... (store in env, never commit)
 # → Agent DID:   did:key:z6Mk...
 
-# Create space and delegation
-storacha space create delibera-v2-main
+# Create per-worker space + delegation (each worker gets its own space)
+storacha space create delibera-worker{N}
+storacha space provision --provider did:web:storacha.network
 storacha delegation create <AGENT_DID> \
   --can 'space/blob/add' --can 'space/index/add' \
   --can 'upload/add' --can 'upload/list' \
-  -o delegation.car
-base64 delegation.car  # → DELIBERA_UCAN_DELEGATION_BASE64
+  --can 'space/content/decrypt' \
+  --base64
+# → base64 string → STORACHA_DELEGATION_PROOF env var
 ```
 
 **Authorization flow (V2):** Agent presents UCAN → Storacha validates capability chain → Lit ACC checked → threshold key released → local decryption. No on-chain lookup per interaction.
@@ -349,24 +392,35 @@ Use the `storacha-vault` skill (`/skill storacha-vault`) for all encrypt+upload 
 
 ---
 
-## Ensue Memory Layout (unchanged from V1)
+## Ensue Memory Layout (DID-keyed, Model A)
 
 ```
 coordination/
   tasks/
-    worker1/
+    did:key:z6Mk.../          ← worker sovereign DID (not worker1/2/3)
       status       "idle"|"pending"|"processing"|"completed"|"failed"
-      result       {workerId, vote, reasoning, computedAt, processingTime}
+      result       {workerId: "did:key:...", vote, reasoning, computedAt, processingTime}
       timestamp    unix ms
       error        null | "error message"
-    worker2/...
-    worker3/...
+      verification_proof  {chat_id, signature, signing_address}
+    did:key:z6Mk.../...       ← second worker
   coordinator/
     status         "idle"|"monitoring"|"recording_submissions"|"aggregating"|"resuming"|"completed"
     tally          {approved, rejected, decision, workerCount, workers, timestamp, proposalId}
     proposal_id    N
+    worker_snapshot_{N}       ← JSON array of worker DIDs snapshotted at vote start
   config/
-    task_definition  {"type":"vote","parameters":{"proposal":"..."}}
+    task_definition  {"type":"vote","parameters":{"proposal":"...","voting_config":{"min_workers":2,"quorum":2}}}
+proposals/
+  {N}/
+    config       task_definition JSON
+    tally        TallyResult JSON
+    status       "completed"
+    workers/
+      did:key:z6Mk.../
+        result   WorkerResult JSON
+        timestamp ISO string
+proposal_index   JSON array of proposal IDs ["1","2",...]
 ```
 
 ---
@@ -461,11 +515,15 @@ Notes: `-C target-cpu=mvp` alone is NOT enough. Use `-Z build-std` to rebuild st
 
 ---
 
-## Registry Contract — unchanged
+## Registry Contract (Permissionless, Model A)
 
 - Deployed: `registry.agents-coordinator.testnet`
-- Methods: `register_coordinator`, `register_worker` (both require 0.7 NEAR deposit)
-- Storage keys: ordinal 0 = Coordinators, ordinal 1 = Workers
+- Methods: `register_coordinator`, `register_worker` (both require **0.1 NEAR** deposit)
+- New structs: `WorkerRecord { account_id, coordinator_did, worker_did, endpoint_url, cvm_id, registered_at, is_active }`, `CoordinatorRecord`
+- View methods: `get_workers_for_coordinator(coordinator_did)`, `get_worker_by_did(worker_did)`, `get_coordinator_by_did(coordinator_did)`
+- Storage keys: ordinals 0-3 deprecated, ordinal 4=`WorkersByDid`, ordinal 5=`CoordinatorsByDid`
+- Workers self-register on startup via `ensureRegistered()` in `task-handler.ts`
+- Coordinator self-registers on startup via `ensureCoordinatorRegistered()` in `index.ts`
 
 ---
 

@@ -27,6 +27,8 @@
     "dotenv": "^16.5.0",
     "ethers": "^6.16.0",
     "hono": "^4.8.4",
+    "near-api-js": "^5.1.1",
+    "near-seed-phrase": "^0.2.1",
     "nova-sdk-js": "^1.0.3",
     "openai": "^6.18.0",
     "viem": "^2.46.3",

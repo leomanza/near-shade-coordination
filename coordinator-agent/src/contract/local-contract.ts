@@ -104,14 +104,22 @@ export async function localViewCall<T>(methodName: string, args: Record<string, 
 /**
  * Call start_coordination on the contract (creates yield + pending request)
  */
-export async function localStartCoordination(taskConfig: string): Promise<number | null> {
+export async function localStartCoordination(
+  taskConfig: string,
+  expectedWorkerCount: number = 3,
+  quorum: number = 0,
+): Promise<number | null> {
   const beforeId = await localViewCall<number>('get_current_proposal_id', {}) ?? 0;
 
   // Fire the start_coordination tx in the background — don't await it.
   // The tx creates the proposal via promise_yield_create (synchronous part),
   // then blocks waiting for coordinator_resume (the yield). We only need the
   // proposal to exist, not the yield to resolve.
-  contractCall('start_coordination', { task_config: taskConfig }).catch(err => {
+  contractCall('start_coordination', {
+    task_config: taskConfig,
+    expected_worker_count: expectedWorkerCount,
+    quorum,
+  }).catch(err => {
     const msg = err?.message || '';
     if (msg.includes('timeout') || msg.includes('ETIMEDOUT') || msg.includes('Timeout') || msg.includes('yield')) {
       // Expected: tx blocks on yield then times out — ignore
@@ -254,6 +262,132 @@ export async function localCoordinatorResume(
     }
 
     console.error(`[CONTRACT] coordinator_resume failed:`, msg.substring(0, 300));
+    return false;
+  }
+}
+
+/* ─── Registry Contract ──────────────────────────────────────────────────── */
+
+const REGISTRY_CONTRACT_ID = process.env.REGISTRY_CONTRACT_ID
+  || (NEAR_NETWORK === 'mainnet' ? 'registry.agents-coordinator.near' : 'registry.agents-coordinator.testnet');
+
+const DEPOSIT_0_1_NEAR = '100000000000000000000000'; // 0.1 NEAR in yocto
+
+/**
+ * View call to the registry contract (no signing needed)
+ */
+export async function localViewRegistry<T>(methodName: string, args: Record<string, unknown>): Promise<T | null> {
+  try {
+    const res = await fetch(NEAR_RPC, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: '1',
+        method: 'query',
+        params: {
+          request_type: 'call_function',
+          finality: 'final',
+          account_id: REGISTRY_CONTRACT_ID,
+          method_name: methodName,
+          args_base64: Buffer.from(JSON.stringify(args)).toString('base64'),
+        },
+      }),
+    });
+    const data = await res.json() as any;
+    if (data.error || !data.result?.result) return null;
+    const bytes = new Uint8Array(data.result.result);
+    const text = new TextDecoder().decode(bytes);
+    return JSON.parse(text) as T;
+  } catch (error) {
+    console.error(`[REGISTRY] View ${methodName} failed:`, error);
+    return null;
+  }
+}
+
+/**
+ * Change call to the registry contract with deposit
+ */
+export async function localCallRegistry(
+  methodName: string,
+  args: Record<string, unknown>,
+  depositYocto: string = '0',
+  gas: string = GAS_200T,
+): Promise<any> {
+  const account = await getAccount();
+  console.log(`[REGISTRY] Calling ${methodName} (deposit: ${depositYocto} yocto)...`);
+
+  const outcome = await account.functionCall({
+    contractId: REGISTRY_CONTRACT_ID,
+    methodName,
+    args,
+    gas: BigInt(gas),
+    attachedDeposit: BigInt(depositYocto),
+  });
+
+  console.log(`[REGISTRY] ${methodName} tx sent`);
+  return outcome;
+}
+
+/**
+ * Register the coordinator in the registry contract (idempotent).
+ * Returns true if already registered or registration succeeds.
+ */
+export async function localRegisterCoordinator(
+  coordinatorDid: string,
+  endpointUrl: string,
+  minWorkers: number,
+  maxWorkers: number,
+  cvmId: string = 'local',
+): Promise<boolean> {
+  try {
+    // Check if already registered
+    const existing = await localViewRegistry<any>('get_coordinator_by_did', {
+      coordinator_did: coordinatorDid,
+    });
+    if (existing) {
+      console.log(`[REGISTRY] Coordinator already registered: ${coordinatorDid}`);
+      return true;
+    }
+
+    await localCallRegistry('register_coordinator', {
+      coordinator_did: coordinatorDid,
+      endpoint_url: endpointUrl,
+      cvm_id: cvmId,
+      min_workers: minWorkers,
+      max_workers: maxWorkers,
+    }, DEPOSIT_0_1_NEAR);
+
+    console.log(`[REGISTRY] Coordinator registered: ${coordinatorDid}`);
+    return true;
+  } catch (error: any) {
+    console.error(`[REGISTRY] register_coordinator failed:`, (error.message || '').substring(0, 300));
+    return false;
+  }
+}
+
+/**
+ * Register a worker in the registry contract (idempotent).
+ * Returns true if already registered or registration succeeds.
+ */
+export async function localRegisterWorkerInRegistry(
+  coordinatorDid: string,
+  workerDid: string,
+  endpointUrl: string,
+  cvmId: string,
+): Promise<boolean> {
+  try {
+    await localCallRegistry('register_worker', {
+      coordinator_did: coordinatorDid,
+      worker_did: workerDid,
+      endpoint_url: endpointUrl,
+      cvm_id: cvmId,
+    }, DEPOSIT_0_1_NEAR);
+
+    console.log(`[REGISTRY] Worker registered: ${workerDid} → coordinator ${coordinatorDid}`);
+    return true;
+  } catch (error: any) {
+    console.error(`[REGISTRY] register_worker failed:`, (error.message || '').substring(0, 300));
     return false;
   }
 }
