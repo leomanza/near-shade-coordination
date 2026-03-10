@@ -1047,10 +1047,37 @@ Next coordinator vote:
 `quorum` = minimum approvals required. Default: strict majority (`floor(N/2) + 1`). Stored in `Proposal` struct for on-chain auditability but enforced in coordinator agent (privacy model).
 
 ### Verification Checklist
-- [ ] Registry contract WASM rebuilt + deployed to `registry.agents-coordinator.testnet`
-- [ ] Coordinator contract WASM rebuilt + deployed to `coordinator.agents-coordinator.testnet`
-- [ ] `WORKER_COUNT=2 ./run-dev.sh` — vote completes with 2 workers
-- [ ] Start 3rd worker mid-run → next vote snapshot includes it
-- [ ] `curl localhost:3000/api/coordinate/workers` returns `source: 'registry'` with DIDs
-- [ ] Frontend coordinator page shows truncated DIDs
-- [ ] `voting_config.quorum=2` override works per proposal
+- [x] Registry contract WASM rebuilt + deployed to `registry.agents-coordinator.testnet`
+- [x] Coordinator contract WASM rebuilt + deployed to `coordinator.agents-coordinator.testnet`
+- [x] `WORKER_COUNT=2 ./run-dev.sh` — vote completes with 2 workers
+- [x] Start 3rd worker mid-run → next vote snapshot includes it
+- [x] `curl localhost:3000/api/coordinate/workers` returns `source: 'registry'` with DIDs
+- [x] Frontend coordinator page shows truncated DIDs
+- [x] `voting_config.quorum=2` override works per proposal
+
+---
+
+## Phase 2.5: Stabilization + One-Click + Human Names (PL Genesis)
+
+### Stabilization (COMPLETE)
+- Storacha gateway retrieval timeout (15s) prevents vote blocking
+- Unreachable worker detection (5s HTTP timeout) prevents coordinator hangs
+- Trigger-first flow prevents `expected_worker_count` mismatch
+- Documented in `FIXES.md`
+
+### One-Click Worker Buy Flow (COMPLETE)
+- `/buy` page: 6-screen state machine (Entry → Config → Progress → AwaitSign → Success | Error)
+- `protocol-api/src/routes/provision.ts`: Backend provisioning API (generate identity, deploy Phala, poll endpoint)
+- Key generation server-side via `@ucanto/principal/ed25519`
+- NEAR wallet signing via `@hot-labs/near-connect` for `register_worker` (0.1 NEAR deposit)
+- Recovery file download on success
+- localStorage persistence for tab-close recovery
+
+### Human-Readable Worker Names (COMPLETE)
+- `shared/src/name-resolver.ts`: Cache-first NameResolver (Ensue → truncated DID fallback)
+- Display names stored in Ensue at `agent/{did}/display_name` (public, unencrypted)
+- Coordinator resolves names in `aggregateResults()` → included in tally
+- `/api/coordinate/workers` returns `display_name` per worker
+- `PATCH /api/coordinate/workers/:did/name` for name updates
+- Frontend worker cards show name prominently, DID as secondary
+- Workers auto-set name from `WORKER_DISPLAY_NAME` env var on init

@@ -313,7 +313,7 @@ to agents between deliberations.
 **Per-worker Storacha spaces (provisioned):**
 | Worker | Space Name | Space DID |
 |--------|------------|-----------|
-| worker1 | delibera-worker1 | `did:key:z6MkfsyAPYQ7uyPSvASA6SpbjR24px35KB5zk5W8556umbK9` |
+| worker1 | delibera-w1-new | `did:key:z6MktJXkKhgNhK1ZiecfG39zhRyn7e88jaijhSkUj5jyPKmc` |
 | worker2 | delibera-worker2 | `did:key:z6Mkovsb6rneiFNKNvPyksvLjWxkg5mwfQ8jSK1zgPamVpnF` |
 | worker3 | delibera-worker3 | `did:key:z6MknVJzCLxyk2M8XQitmfzdZv6KdeVHkFhaNvHZPieCfFHt` |
 
@@ -406,11 +406,18 @@ coordination/
     did:key:z6Mk.../...       ← second worker
   coordinator/
     status         "idle"|"monitoring"|"recording_submissions"|"aggregating"|"resuming"|"completed"
-    tally          {approved, rejected, decision, workerCount, workers, timestamp, proposalId}
+    tally          {approved, rejected, decision, workerCount, workers, workerNames, timestamp, proposalId}
     proposal_id    N
     worker_snapshot_{N}       ← JSON array of worker DIDs snapshotted at vote start
   config/
     task_definition  {"type":"vote","parameters":{"proposal":"...","voting_config":{"min_workers":2,"quorum":2}}}
+agent/
+  did:key:z6Mk.../
+    display_name   "Alice's Voter"          ← human-readable name (public, unencrypted)
+    manifesto_cid  bafy...                  ← CID → encrypted AgentManifesto in Storacha
+    preferences_cid  bafy...                ← CID → encrypted AgentPreferences in Storacha
+    decisions_cid  bafy...                  ← CID → encrypted DecisionRecord[] in Storacha
+    knowledge_cid  bafy...                  ← CID → encrypted string[] in Storacha
 proposals/
   {N}/
     config       task_definition JSON
@@ -541,6 +548,56 @@ Skills live in `.claude/skills/`. Invoke with `/skill <name>`.
 
 ---
 
+## One-Click Worker Buy Flow (V2.5)
+
+The `/buy` page provides a zero-config worker deployment flow:
+
+**Frontend screens:** Entry → Config → Provisioning → AwaitingSignature → Success | Error
+
+**Backend:** `protocol-api/src/routes/provision.ts` — 3 endpoints:
+- `POST /api/provision/worker` — Start provisioning (generates identity, deploys to Phala)
+- `GET /api/provision/status/:jobId` — Poll progress (frontend polls every 5s)
+- `POST /api/provision/register` — Mark complete after wallet sign
+
+**Flow:**
+1. User connects NEAR wallet, enters worker name, selects coordinator
+2. Backend generates ed25519 keypair via `@ucanto/principal`, derives `did:key`
+3. Backend creates per-worker UCAN delegation from coordinator's Storacha space → worker DID
+4. Backend deploys Phala CVM with all env vars (worker key, delegation, Ensue creds, etc.)
+5. Backend polls for endpoint URL (up to 15 min via `watchForEndpoint()`)
+6. Frontend shows progress, then prompts user to sign `register_worker` tx (0.1 NEAR)
+7. User signs via `@hot-labs/near-connect` wallet
+8. Success screen shows DID + endpoint + recovery file download
+
+**Storacha isolation:** Each worker gets a unique UCAN delegation scoped to the coordinator's space. Creating separate spaces programmatically requires email auth (not suitable for automation), so sub-delegation provides identity-level isolation. Ensue keys are namespaced by worker DID.
+
+**Docker image:** `leomanza/delibera-worker:latest` (DockerHub, NOT ghcr.io)
+
+**Recovery file:** `worker-recovery.json` contains workerDid, storachaPrivateKey, phalaEndpoint, etc.
+
+**localStorage persistence:** `delibera_provision_job_id` survives tab close for resumption.
+
+---
+
+## Human-Readable Worker Names (V2.5)
+
+Display names are mutable labels stored in Ensue at `agent/{did}/display_name`.
+They are public metadata (not encrypted) — anyone can read, only the owner can write.
+
+**NameResolver** (`shared/src/name-resolver.ts`):
+- Cache-first resolution: Ensue → truncated DID fallback
+- Used in coordinator's `aggregateResults()` to include names in tally
+- Used in `/api/coordinate/workers` endpoint to include `display_name` per worker
+
+**Setting names:**
+- One-click flow: Set automatically via `WORKER_DISPLAY_NAME` env var on worker init
+- API: `PATCH /api/coordinate/workers/:did/name` with `{ name: "..." }`
+- Frontend: `setWorkerDisplayName(did, name)` in `api.ts`
+
+**Display:** Worker cards show name prominently, truncated DID as secondary info.
+
+---
+
 ## Common Gotchas — V1 (still applies)
 
 1. **Yield timeout** — ~200 blocks. On testnet blocks are ~0.5s so real timeout is **~100s, NOT 200s**. `localStartCoordination` fires the tx in the background and polls for the proposal ID (takes ~4s). Do NOT add sleeps/waits that eat into this budget.
@@ -561,12 +618,14 @@ Skills live in `.claude/skills/`. Invoke with `/skill <name>`.
 13. **Flow VRF seed** — The VRF seed is a `UFix64` string. Strip the decimal before using as an integer seed for shuffles.
 14. **Filecoin deal activation** — Deals take minutes to activate. Log the deal ID immediately; verify status asynchronously.
 15. **Ensue backup trigger** — The `ensue-backup` skill must run at deliberation cycle end AND every 50 turns. Configure both triggers in `.claude.json` plugin config.
-16. **@storacha/client is ESM-only** — This project uses `"type": "commonjs"`. Static imports of `@storacha/client` (or its subpath exports like `./stores/memory`, `./principal/ed25519`, `./proof`) will fail at runtime with `ERR_PACKAGE_PATH_NOT_EXPORTED` because the package only has `import` conditions in its exports map. **Fix:** Use dynamic `import()` inside async functions with lazy caching. See `coordinator-agent/src/storacha/identity.ts` for the canonical pattern. This same pattern will be required for `@storacha/encrypt-upload-client` and any other ESM-only Storacha/Lit packages.
+16. **@storacha/client is ESM-only** — This project uses `"type": "commonjs"` and `"module": "commonjs"` in tsconfig. Plain `await import('...')` gets compiled by `tsc` to `require('...')`, which fails at runtime with `ERR_PACKAGE_PATH_NOT_EXPORTED` for ESM-only packages. **Fix:** Use `const dynamicImport = new Function('specifier', 'return import(specifier)')` then call `await dynamicImport('...')`. This prevents `tsc` from transforming the import. Applied to all files importing ESM-only packages: `@storacha/client`, `@storacha/encrypt-upload-client`, `@lit-protocol/*`, `@ucanto/principal`, `multiformats`, `viem`. See `worker-agent/src/storacha/identity.ts` for the canonical pattern.
 17. **MCP storage server build** — `mcp-storage-server/` has TypeScript errors in its `test/` directory. The default `npm run build` includes tests and fails. **Fix:** Use `tsconfig.build.json` (already created) which excludes `test/`. Build with `npx tsc -p tsconfig.build.json`.
 18. **Storacha test scripts must be .mjs** — Because `@storacha/client` is ESM-only, standalone test scripts that directly import it must use `.mjs` extension (or live in an ESM package). CJS `.ts` files can only access Storacha through the dynamic `import()` wrapper in `identity.ts`.
 19. **taskConfig double-stringify** — The `/api/coordinate/trigger` route receives `taskConfig` as either a string (curl) or object (frontend). `coordinate.ts` normalizes with `typeof taskConfig === 'string' ? taskConfig : JSON.stringify(taskConfig)`. The worker polling loop in `task-handler.ts` also has a defensive guard: `if (typeof taskConfig === 'string') taskConfig = JSON.parse(taskConfig)`. Without both guards, workers execute the `default` random task instead of the vote task (because `config.type` is undefined on a string).
 20. **localStartCoordination timing** — `start_coordination` creates a yielded promise that blocks for ~200 blocks. The function fires the tx in the background (don't await) and polls `get_current_proposal_id` every 500ms for up to 8s to detect the new proposal. Never add `await` on the `contractCall` or add sleeps — the previous 15s+5s approach wasted ~40 blocks and caused proposals to time out before `coordinator_resume` could be called.
 21. **Testnet block timing** — NEAR testnet blocks average ~0.5s, NOT 1s. The 200-block yield timeout is ~100 seconds real time. AI voting takes ~25-80s depending on NEAR AI load. The total pipeline (proposal creation + voting + tally + resume) must complete within this window.
 22. **Frontend Nova→Storacha migration** — All Nova SDK references were removed from the frontend (8 files, 43 references). When changing identity/storage systems, always check BOTH backend AND frontend — labels, badges, form fields, deploy payloads, API types, log messages, footers, and flow diagrams all need updating.
-23. **Worker profile persistence** — `StorachaProfileClient` uses Ensue as primary persistence and Storacha as encrypted backup. Decision history is stored in `agent/{workerId}/decisions` Ensue key. The client is a singleton with session-level caching. `config/profiles.json` is a seed file — it is only read as fallback when Storacha is not configured (LOCAL_MODE). After migration, runtime reads go to Ensue.
+23. **Worker profile persistence** — `StorachaProfileClient` uses the worker's **DID** (`did:key:z6Mk...`) as the Ensue key prefix, NOT the legacy `WORKER_ID` (`worker1`/`worker2`/`worker3`). **Storacha is the PRIMARY persistent store** — read order is: Storacha → Ensue cache → empty (blank identity for new workers). Ensue is a write-through cache for fast reads. `profiles.json` is NOT used — freshly deployed workers start with a blank identity that the owner fills in via the app. The `saveManifesto()` and `savePreferences()` methods persist to Storacha first, then cache to Ensue.
 24. **Worker vault.ts** — Both coordinator and worker have their own `vault.ts` files (ported, not shared). Each uses per-worker `appName` and `storagePath` for Lit auth storage to avoid conflicts when running multiple workers on the same machine.
+25. **Provisioning API in protocol-api** — The one-click worker provisioning routes live in `protocol-api/src/routes/provision.ts` (NOT coordinator-agent). This is because the Phala deploy logic (`deployCvm`, `watchForEndpoint`) already lives in `protocol-api/src/phala/phala-client.ts`. The provisioning flow generates keys server-side via `@ucanto/principal/ed25519` (dynamic import for ESM). **Docker image:** `leomanza/delibera-worker:latest` — NOT `ghcr.io/delibera-ai/worker-agent:latest` which doesn't exist. **Storacha:** Per-worker UCAN delegation is created programmatically from the coordinator's space (can't create spaces without email auth). Protocol-api env MUST have `STORACHA_AGENT_PRIVATE_KEY` and `STORACHA_DELEGATION_PROOF` (coordinator's credentials).
+26. **Display names in Ensue** — Worker display names are stored in Ensue at `agent/{did}/display_name` (NOT in Storacha). This was chosen because Storacha gateway retrieval is unreliable (documented in FIXES.md), and display names are public metadata that don't need encryption. The `NameResolver` in `shared/src/name-resolver.ts` provides cache-first resolution.

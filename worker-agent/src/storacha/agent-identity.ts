@@ -11,8 +11,6 @@
 import { isStorachaConfigured, getAgentDid } from './identity';
 import { getProfileClient } from './profile-client';
 
-const WORKER_ID = process.env.WORKER_ID || 'worker1';
-
 /* ─── Types ───────────────────────────────────────────────────────────────── */
 
 export interface AgentManifesto {
@@ -50,16 +48,16 @@ export async function initializeIdentity(): Promise<void> {
   // Warm up the profile client singleton
   const client = await getProfileClient();
 
-  if (isStorachaConfigured()) {
-    const did = await getAgentDid();
-    console.log(`[identity] Worker ${WORKER_ID} identity ready (DID: ${did}, Storacha-backed)`);
-  } else {
-    console.log(`[identity] Worker ${WORKER_ID} using local fallback (Storacha not configured)`);
-  }
+  const label = isStorachaConfigured()
+    ? `DID: ${(await getAgentDid()).substring(0, 24)}..., Storacha-backed`
+    : `local fallback (Storacha not configured)`;
+  console.log(`[identity] Worker identity ready (${label})`);
 
   // Pre-load identity to cache it
   const identity = await client.loadIdentity();
-  console.log(`[identity] Worker ${WORKER_ID} profile loaded: ${identity.manifesto.name} (${identity.manifesto.role}), ${identity.recentDecisions.length} past decisions`);
+  const name = identity.manifesto.name || '(blank)';
+  const role = identity.manifesto.role || '(no role set)';
+  console.log(`[identity] Profile loaded: ${name} (${role}), ${identity.recentDecisions.length} past decisions`);
 }
 
 export async function loadIdentity(): Promise<AgentIdentity> {

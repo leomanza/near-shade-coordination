@@ -1,4 +1,4 @@
-import { EnsueClient, createEnsueClient } from '@near-shade-coordination/shared';
+import { EnsueClient, createEnsueClient, NameResolver } from '@near-shade-coordination/shared';
 import {
   MEMORY_KEYS,
   getWorkerKeys,
@@ -30,6 +30,13 @@ let _ensueClient: EnsueClient | null = null;
 function getEnsueClient(): EnsueClient {
   if (!_ensueClient) _ensueClient = createEnsueClient();
   return _ensueClient;
+}
+
+// Lazy-initialize NameResolver (caches display names for worker DIDs)
+let _nameResolver: NameResolver | null = null;
+function getNameResolver(): NameResolver {
+  if (!_nameResolver) _nameResolver = new NameResolver(getEnsueClient());
+  return _nameResolver;
 }
 
 // Polling interval (5 seconds like verifiable-ai-dao/src/responder.ts:13)
@@ -183,7 +190,21 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
 
     console.log(`[LOCAL] ${activeWorkers.length} active workers discovered: [${activeWorkers.map(w => w.worker_did).join(', ')}]`);
 
-    // Step 2: Start coordination on-chain (creates yield + pending request)
+    // Step 2: Update coordinator status
+    await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'monitoring');
+
+    // Step 3: Trigger all workers by writing task config to Ensue + HTTP
+    // triggerWorkers may filter out unreachable workers (modifies array in-place)
+    await triggerWorkers(taskConfig, activeWorkers);
+
+    // Re-check min workers after filtering unreachable ones
+    if (activeWorkers.length < effectiveMinWorkers) {
+      console.warn(`[LOCAL] Not enough reachable workers (${activeWorkers.length} < ${effectiveMinWorkers}). Aborting.`);
+      await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'idle');
+      return null;
+    }
+
+    // Step 4: Start coordination on-chain with actual reachable worker count
     console.log('[LOCAL] Starting on-chain coordination...');
 
     let proposalId: number | null = null;
@@ -193,8 +214,7 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
         console.log(`[LOCAL] On-chain proposal #${proposalId} created`);
         await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_PROPOSAL_ID, proposalId.toString());
 
-        // Store worker snapshot for this proposal (prevents mid-vote registration changes)
-        // getCoordinatorSnapshotKey imported at top level
+        // Store worker snapshot for this proposal (only reachable workers)
         await getEnsueClient().updateMemory(
           getCoordinatorSnapshotKey(proposalId),
           JSON.stringify(activeWorkers.map(w => w.worker_did))
@@ -203,12 +223,6 @@ export async function triggerLocalCoordination(taskConfig: string): Promise<Tall
     } catch (err) {
       console.warn('[LOCAL] Contract call failed, continuing without on-chain:', err);
     }
-
-    // Step 3: Update coordinator status
-    await getEnsueClient().updateMemory(MEMORY_KEYS.COORDINATOR_STATUS, 'monitoring');
-
-    // Step 4: Trigger all workers by writing task config to Ensue + HTTP
-    await triggerWorkers(taskConfig, activeWorkers);
 
     // Step 5: Monitor Ensue for worker completions
     const workerDIDs = activeWorkers.map(w => w.worker_did);
@@ -542,9 +556,10 @@ async function triggerWorkers(taskConfig: string, workers: WorkerRecord[]): Prom
     workers.map(w => getEnsueClient().updateMemory(getWorkerKeys(w.worker_did).STATUS, 'pending'))
   );
 
-  // In local mode, trigger workers via HTTP
+  // In local mode, trigger workers via HTTP and track which ones are reachable
   if (LOCAL_MODE) {
     const parsed = (() => { try { return JSON.parse(taskConfig); } catch { return { type: 'random' }; } })();
+    const unreachableWorkers: Set<string> = new Set();
 
     await Promise.all(
       workers.map(async (w) => {
@@ -553,14 +568,26 @@ async function triggerWorkers(taskConfig: string, workers: WorkerRecord[]): Prom
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ taskConfig: parsed }),
+            signal: AbortSignal.timeout(5000),
           });
           const data = await res.json();
           console.log(`[LOCAL] Triggered ${w.worker_did} (${w.endpoint_url}):`, data);
         } catch (error) {
-          console.error(`[LOCAL] Failed to trigger ${w.worker_did} (${w.endpoint_url}):`, error);
+          console.error(`[LOCAL] Failed to trigger ${w.worker_did} (${w.endpoint_url}) — marking unreachable`);
+          unreachableWorkers.add(w.worker_did);
+          // Reset status so coordinator doesn't wait for this worker
+          await getEnsueClient().updateMemory(getWorkerKeys(w.worker_did).STATUS, 'idle');
         }
       })
     );
+
+    // Remove unreachable workers from the active list
+    if (unreachableWorkers.size > 0) {
+      const reachable = workers.filter(w => !unreachableWorkers.has(w.worker_did));
+      console.warn(`[LOCAL] ${unreachableWorkers.size} worker(s) unreachable, continuing with ${reachable.length}`);
+      workers.length = 0;
+      workers.push(...reachable);
+    }
   }
 
   console.log(`Workers triggered (${workers.length}), task config written to Ensue`);
@@ -687,6 +714,15 @@ async function aggregateResults(proposalId: number): Promise<TallyResult> {
   const minPositives = votingConfig?.quorum ?? (Math.floor(workerDIDs.length / 2) + 1);
   const decision = hasVotes ? (approved >= minPositives ? 'Approved' : 'Rejected') : 'Approved';
 
+  // Resolve display names for all participating workers
+  let workerNames: Record<string, string> | undefined;
+  try {
+    const nameMap = await getNameResolver().resolveAll(workerDIDs);
+    workerNames = Object.fromEntries(nameMap);
+  } catch (e) {
+    console.warn('[coordinator] Name resolution failed (non-fatal):', e);
+  }
+
   const tally: TallyResult = {
     aggregatedValue,
     approved,
@@ -696,6 +732,7 @@ async function aggregateResults(proposalId: number): Promise<TallyResult> {
     workers: workerResults,
     timestamp: new Date().toISOString(),
     proposalId,
+    workerNames,
   };
 
   return tally;

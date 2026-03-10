@@ -1,7 +1,7 @@
 {
   "_comment": "SEED FILE — not read at runtime after Storacha migration. Used only for initial provisioning, LOCAL_MODE fallback, and as schema reference for WorkerProfile type.",
   "worker1": {
-    "name": "Pepito",
+    "name": "Jambo",
     "role": "Community Guardian",
     "values": [
       "Inclusive governance and broad participation",
@@ -19,7 +19,7 @@
     }
   },
   "worker2": {
-    "name": "Juancito",
+    "name": "Kiko",
     "role": "Technical Analyst",
     "values": [
       "Security-first design and risk mitigation",
@@ -37,7 +37,7 @@
     }
   },
   "worker3": {
-    "name": "Pablito",
+    "name": "Polo",
     "role": "Sustainability Strategist",
     "values": [
       "Long-term ecosystem health over short-term gains",

@@ -17,6 +17,10 @@
 
 import { createStorachaClient } from './identity';
 
+// Use indirect dynamic import to prevent tsc from compiling import() to require().
+// ESM-only packages (Storacha, Lit, multiformats) fail with ERR_PACKAGE_PATH_NOT_EXPORTED under require().
+const dynamicImport = new Function('specifier', 'return import(specifier)');
+
 const WORKER_ID = process.env.WORKER_ID || 'worker1';
 
 /**
@@ -31,9 +35,11 @@ const FALLBACK_GATEWAYS = [
 ];
 
 /** Max retries per gateway before moving to the next one. */
-const RETRIES_PER_GATEWAY = 2;
+const RETRIES_PER_GATEWAY = 1;
 /** Delay between retries on the same gateway (ms). */
-const RETRY_DELAY_MS = 1500;
+const RETRY_DELAY_MS = 1000;
+/** Per-retrieval timeout (ms) — abort if a single gateway takes too long. */
+const RETRIEVAL_TIMEOUT_MS = 10000;
 
 // Cached instances (use promise-based singletons for concurrent access)
 let _encryptedClientPromise: Promise<any> | null = null;
@@ -55,13 +61,13 @@ async function loadModules() {
   if (_modules) return _modules;
   if (!_loadPromise) {
     _loadPromise = (async () => {
-      const euc = await import('@storacha/encrypt-upload-client');
-      const factories = await import(
-        '@storacha/encrypt-upload-client/factories.node' as any
+      const euc = await dynamicImport('@storacha/encrypt-upload-client');
+      const factories = await dynamicImport(
+        '@storacha/encrypt-upload-client/factories.node'
       );
-      const litClient = await import('@lit-protocol/lit-client');
-      const litAuth = await import('@lit-protocol/auth');
-      const networks = await import('@lit-protocol/networks');
+      const litClient = await dynamicImport('@lit-protocol/lit-client');
+      const litAuth = await dynamicImport('@lit-protocol/auth');
+      const networks = await dynamicImport('@lit-protocol/networks');
 
       _modules = {
         eucCreate: euc.create,
@@ -198,7 +204,7 @@ async function tryRetrieveAndDecrypt(
   cidString: string,
   decryptionConfig: any,
 ): Promise<unknown> {
-  const { CID } = await import('multiformats/cid');
+  const { CID } = await dynamicImport('multiformats/cid');
   const cid = CID.parse(cidString);
 
   const { stream, fileMetadata } =
@@ -279,7 +285,12 @@ export async function retrieveAndDecrypt(
           ? await getEncryptedClient()
           : await createEncryptedClientForGateway(gateway);
 
-        return await tryRetrieveAndDecrypt(client, cidString, decryptionConfig);
+        return await Promise.race([
+          tryRetrieveAndDecrypt(client, cidString, decryptionConfig),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error(`Retrieval timed out after ${RETRIEVAL_TIMEOUT_MS}ms`)), RETRIEVAL_TIMEOUT_MS)
+          ),
+        ]);
       } catch (err: any) {
         const errMsg = err?.message || String(err);
         errors.push({ gateway, error: errMsg });

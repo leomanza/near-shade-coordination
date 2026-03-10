@@ -10,21 +10,11 @@ import { useAuth } from "@/lib/auth";
 import {
   getCoordinatorStatus,
   getWorkerStatuses,
-  getOnChainState,
+  getProposalHistory,
   type CoordinatorStatus,
   type WorkerStatuses,
-  type OnChainState,
-  type OnChainProposal,
-  type ProposalState,
-  type RegisteredWorker,
+  type ProposalSummary,
 } from "@/lib/api";
-
-const STATE_COLORS: Record<ProposalState, string> = {
-  Created: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
-  WorkersCompleted: "bg-blue-500/20 text-blue-400 border-blue-500/30",
-  Finalized: "bg-green-500/20 text-green-400 border-green-500/30",
-  TimedOut: "bg-red-500/20 text-red-400 border-red-500/30",
-};
 
 export default function WorkerDashboardContent({
   workerId,
@@ -37,22 +27,24 @@ export default function WorkerDashboardContent({
 }) {
   const coordFetcher = useCallback(getCoordinatorStatus, []);
   const workerFetcher = useCallback(getWorkerStatuses, []);
-  const chainFetcher = useCallback(getOnChainState, []);
+  // Fetch only proposals this worker participated in
+  const proposalFetcher = useCallback(
+    () => getProposalHistory(workerId),
+    [workerId]
+  );
 
   const { data: coordStatus } = usePolling<CoordinatorStatus>(coordFetcher, 2000);
   const { data: workerStatuses, error: workerError } =
     usePolling<WorkerStatuses>(workerFetcher, 2000);
-  const { data: chainState } = usePolling<OnChainState>(chainFetcher, 5000);
+  const { data: proposalData } = usePolling<{ proposals: ProposalSummary[]; total: number }>(
+    proposalFetcher, 10000
+  );
 
   // Authenticated worker view
   const myStatus = workerStatuses?.workers[workerId] || "unknown";
 
-  // Find finalized proposals to show aggregate decisions (no other workers' details)
-  const proposals = chainState?.proposals ?? [];
-  const finalizedProposals = proposals
-    .filter((p) => p.proposal.state === "Finalized")
-    .slice(-10)
-    .reverse();
+  // Only proposals this worker participated in (already filtered by backend)
+  const myProposals = (proposalData?.proposals ?? []).slice(-10).reverse();
 
   return (
     <PageShell accountId={accountId} onDisconnect={onDisconnect}>
@@ -80,13 +72,17 @@ export default function WorkerDashboardContent({
           status={workerError ? "offline" : myStatus}
         />
 
-        {/* Current proposal status */}
+        {/* Current proposal status — only show if this worker is participating */}
         <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
           <h3 className="text-sm font-semibold text-zinc-100 mb-3 font-mono">
             // Current Proposal
           </h3>
           {coordStatus?.status === "idle" || !coordStatus ? (
             <p className="text-xs text-zinc-600 font-mono">No active proposal</p>
+          ) : myStatus === "idle" || myStatus === "unknown" ? (
+            <p className="text-xs text-zinc-600 font-mono">
+              Active proposal #{coordStatus.proposalId} — your worker is not participating
+            </p>
           ) : (
             <div className="space-y-2">
               <div className="flex items-center gap-2 text-xs">
@@ -128,21 +124,47 @@ export default function WorkerDashboardContent({
         </div>
       </div>
 
-      {/* Finalized Proposals (aggregate only — no individual worker data) */}
+      {/* Past decisions — only proposals this worker participated in */}
       <div className="rounded-xl border border-zinc-800 bg-[#0a0f0a]/80 p-5">
         <h3 className="text-sm font-semibold text-zinc-100 mb-4 font-mono">
-          // Past Decisions (On-Chain)
+          // My Past Decisions
         </h3>
-        {finalizedProposals.length === 0 ? (
-          <p className="text-xs text-zinc-600 font-mono">No finalized proposals yet</p>
+        {myProposals.length === 0 ? (
+          <p className="text-xs text-zinc-600 font-mono">No proposals voted on yet</p>
         ) : (
           <div className="space-y-1.5 max-h-60 overflow-y-auto">
-            {finalizedProposals.map(({ proposalId, proposal }) => (
-              <FinalizedProposalRow
-                key={proposalId}
-                proposalId={proposalId}
-                proposal={proposal}
-              />
+            {myProposals.map((p) => (
+              <div
+                key={p.proposalId}
+                className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-800/60 text-xs"
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-zinc-400 font-bold">#{p.proposalId}</span>
+                  <span
+                    className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border ${
+                      p.status === "completed"
+                        ? "bg-green-500/20 text-green-400 border-green-500/30"
+                        : "bg-zinc-500/20 text-zinc-400 border-zinc-500/30"
+                    }`}
+                  >
+                    {p.status}
+                  </span>
+                  {p.decision && (
+                    <span
+                      className={`font-semibold ${
+                        p.decision === "Approved" ? "text-green-400" : "text-red-400"
+                      }`}
+                    >
+                      {p.decision}
+                    </span>
+                  )}
+                </div>
+                {p.approved != null && (
+                  <span className="text-zinc-500">
+                    {p.approved}Y / {p.rejected}N
+                  </span>
+                )}
+              </div>
             ))}
           </div>
         )}
@@ -204,51 +226,3 @@ function PageShell({
   );
 }
 
-/* ─── Finalized Proposal Row (aggregate only) ────────────────────────────── */
-
-function FinalizedProposalRow({
-  proposalId,
-  proposal,
-}: {
-  proposalId: number;
-  proposal: OnChainProposal;
-}) {
-  const parsed = proposal.finalized_result
-    ? (() => {
-        try {
-          return JSON.parse(proposal.finalized_result);
-        } catch {
-          return null;
-        }
-      })()
-    : null;
-
-  const isVote = parsed && typeof parsed.approved === "number";
-
-  return (
-    <div className="flex items-center justify-between p-2.5 rounded-lg bg-zinc-800/60 text-xs">
-      <div className="flex items-center gap-2">
-        <span className="font-mono text-zinc-400 font-bold">#{proposalId}</span>
-        <span
-          className={`px-1.5 py-0.5 rounded text-[9px] font-semibold border ${STATE_COLORS[proposal.state]}`}
-        >
-          {proposal.state}
-        </span>
-        {isVote && (
-          <span
-            className={`font-semibold ${
-              parsed.decision === "Approved" ? "text-green-400" : "text-red-400"
-            }`}
-          >
-            {parsed.decision}
-          </span>
-        )}
-      </div>
-      {isVote && (
-        <span className="text-zinc-500">
-          {parsed.approved}Y / {parsed.rejected}N
-        </span>
-      )}
-    </div>
-  );
-}

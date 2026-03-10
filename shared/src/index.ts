@@ -10,3 +10,4 @@ export * from './types';
 export * from './ensue-client';
 export * from './utils';
 export * from './did-utils';
+export * from './name-resolver';

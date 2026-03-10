@@ -4,6 +4,7 @@ import {
   formatIdentityContext,
 } from '../storacha/agent-identity';
 import { isStorachaConfigured, getAgentDid } from '../storacha/identity';
+import { getProfileClient } from '../storacha/profile-client';
 
 const app = new Hono();
 
@@ -29,6 +30,80 @@ app.get('/identity', async (c) => {
   } catch (error) {
     return c.json(
       { error: 'Failed to load identity', details: error instanceof Error ? error.message : 'Unknown' },
+      500,
+    );
+  }
+});
+
+/**
+ * POST /api/knowledge/feed
+ * Feed knowledge notes to the agent. Persists to Storacha.
+ */
+app.post('/feed', async (c) => {
+  try {
+    const body = await c.req.json<{ notes?: string[]; votingWeights?: Record<string, number> }>();
+    const client = await getProfileClient();
+
+    // Append knowledge notes
+    if (body.notes && body.notes.length > 0) {
+      for (const note of body.notes) {
+        await client.appendKnowledgeNote(note);
+      }
+    }
+
+    // Update voting weights if provided
+    if (body.votingWeights) {
+      const prefs = await client.getPreferences();
+      const updated = {
+        ...prefs,
+        votingWeights: { ...prefs.votingWeights, ...body.votingWeights },
+        updatedAt: new Date().toISOString(),
+      };
+      await client.savePreferences(updated);
+    }
+
+    const preferences = await client.getPreferences();
+    const knowledge = await client.getKnowledgeNotes();
+
+    return c.json({
+      message: `Knowledge fed: ${body.notes?.length || 0} notes`,
+      preferences: { ...preferences, knowledgeNotes: knowledge },
+    });
+  } catch (error) {
+    return c.json(
+      { error: 'Failed to feed knowledge', details: error instanceof Error ? error.message : 'Unknown' },
+      500,
+    );
+  }
+});
+
+/**
+ * POST /api/knowledge/manifesto
+ * Update the agent's manifesto. Persists to Storacha.
+ */
+app.post('/manifesto', async (c) => {
+  try {
+    const updates = await c.req.json<{ name?: string; role?: string; guidelines?: string; values?: string[] }>();
+    const client = await getProfileClient();
+    const current = await client.getManifesto();
+
+    const updated = {
+      ...current,
+      ...(updates.name !== undefined && { name: updates.name }),
+      ...(updates.role !== undefined && { role: updates.role }),
+      ...(updates.guidelines !== undefined && { guidelines: updates.guidelines }),
+      ...(updates.values !== undefined && { values: updates.values }),
+    };
+
+    await client.saveManifesto(updated);
+
+    return c.json({
+      message: 'Manifesto updated',
+      manifesto: updated,
+    });
+  } catch (error) {
+    return c.json(
+      { error: 'Failed to update manifesto', details: error instanceof Error ? error.message : 'Unknown' },
       500,
     );
   }

@@ -1,5 +1,5 @@
 import { Hono } from 'hono';
-import { EnsueClient, createEnsueClient } from '@near-shade-coordination/shared';
+import { EnsueClient, createEnsueClient, NameResolver } from '@near-shade-coordination/shared';
 import {
   MEMORY_KEYS,
   getWorkerKeys,
@@ -15,6 +15,8 @@ import { selectJury, verifyJurySelection } from '../vrf/jury-selector';
 
 const LOCAL_MODE = process.env.LOCAL_MODE === 'true';
 const app = new Hono();
+
+let _nameResolver: NameResolver | null = null;
 
 let _ensueClient: EnsueClient | null = null;
 function getEnsueClient(): EnsueClient {
@@ -108,14 +110,21 @@ app.get('/workers', async (c) => {
     const registryWorkers = await getRegistryWorkers();
 
     if (registryWorkers.length > 0) {
-      // Registry-based response: return full worker info with Ensue status
+      // Registry-based response: return full worker info with Ensue status + display names
       const statusKeys = registryWorkers.map(w => getWorkerKeys(w.did).STATUS);
       const statuses = await getEnsueClient().readMultiple(statusKeys);
+
+      // Resolve display names for all workers
+      if (!_nameResolver) _nameResolver = new NameResolver(getEnsueClient());
+      const dids = registryWorkers.map(w => w.did);
+      await _nameResolver.resolveAll(dids).catch(() => {});
+      const names = _nameResolver.getCachedNames();
 
       const workers = registryWorkers.map(w => {
         const ensueStatus = statuses[getWorkerKeys(w.did).STATUS] || null;
         return {
           did: w.did,
+          display_name: names[w.did] || null,
           endpoint_url: w.endpoint_url,
           is_active: w.is_active,
           registered_at: w.registered_at,
@@ -171,6 +180,27 @@ app.get('/workers', async (c) => {
       },
       500
     );
+  }
+});
+
+/**
+ * PATCH /api/coordinate/workers/:did/name
+ * Set or update a worker's display name.
+ * Stored in Ensue at `agent/{did}/display_name`.
+ */
+app.patch('/workers/:did/name', async (c) => {
+  try {
+    const did = decodeURIComponent(c.req.param('did'));
+    const body = await c.req.json<{ name: string }>();
+    if (!body.name || body.name.trim().length < 1) {
+      return c.json({ error: 'name is required' }, 400);
+    }
+    if (!_nameResolver) _nameResolver = new NameResolver(getEnsueClient());
+    await _nameResolver.setName(did, body.name.trim());
+    return c.json({ did, name: body.name.trim(), status: 'updated' });
+  } catch (error) {
+    console.error('Error setting worker name:', error);
+    return c.json({ error: 'Failed to set name' }, 500);
   }
 });
 
@@ -292,17 +322,30 @@ app.post('/reset', async (c) => {
  */
 app.get('/proposals', async (c) => {
   try {
+    const workerDid = c.req.query('workerDid');
     const indexStr = await getEnsueClient().readMemory(PROPOSAL_INDEX_KEY);
     const proposalIds: string[] = indexStr ? JSON.parse(indexStr) : [];
 
     // Fetch summary for each proposal
-    const proposals = await Promise.all(
+    const allProposals = await Promise.all(
       proposalIds.map(async (id) => {
         const pKeys = getProposalKeys(id);
-        const [status, tallyStr] = await Promise.all([
+        const fetches: Promise<string | null>[] = [
           getEnsueClient().readMemory(pKeys.STATUS),
           getEnsueClient().readMemory(pKeys.TALLY),
-        ]);
+        ];
+        // If filtering by worker, check if they have a result for this proposal
+        if (workerDid) {
+          const wKeys = getProposalWorkerKeys(id, workerDid);
+          fetches.push(getEnsueClient().readMemory(wKeys.RESULT));
+        }
+        const results = await Promise.all(fetches);
+        const [status, tallyStr] = results;
+        const workerResult = workerDid ? results[2] : 'skip';
+
+        // If filtering by worker and they have no result, exclude this proposal
+        if (workerDid && !workerResult) return null;
+
         const tally = tallyStr ? JSON.parse(tallyStr) : null;
         return {
           proposalId: id,
@@ -316,6 +359,7 @@ app.get('/proposals', async (c) => {
       })
     );
 
+    const proposals = allProposals.filter(Boolean);
     return c.json({ proposals, total: proposals.length });
   } catch (error) {
     console.error('Error listing proposals:', error);

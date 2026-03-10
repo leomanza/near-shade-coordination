@@ -18,18 +18,22 @@
 let _client: any = null;
 let _signer: any = null;
 
-// Lazy-loaded ESM modules
-let _Client: typeof import('@storacha/client') | null = null;
-let _Signer: typeof import('@storacha/client/principal/ed25519') | null = null;
-let _Proof: typeof import('@storacha/client/proof') | null = null;
+// Lazy-loaded ESM modules (types are `any` because @storacha/client is ESM-only)
+let _Client: any = null;
+let _Signer: any = null;
+let _Proof: any = null;
 let _StoreMemory: any = null;
+
+// Use indirect dynamic import to prevent tsc from compiling import() to require().
+// @storacha/client is ESM-only; require() fails with ERR_PACKAGE_PATH_NOT_EXPORTED.
+const dynamicImport = new Function('specifier', 'return import(specifier)');
 
 async function loadModules() {
   if (!_Client) {
-    _Client = await import('@storacha/client');
-    _Signer = await import('@storacha/client/principal/ed25519');
-    _Proof = await import('@storacha/client/proof');
-    const stores = await import('@storacha/client/stores/memory');
+    _Client = await dynamicImport('@storacha/client');
+    _Signer = await dynamicImport('@storacha/client/principal/ed25519');
+    _Proof = await dynamicImport('@storacha/client/proof');
+    const stores = await dynamicImport('@storacha/client/stores/memory');
     _StoreMemory = stores.StoreMemory;
   }
 }

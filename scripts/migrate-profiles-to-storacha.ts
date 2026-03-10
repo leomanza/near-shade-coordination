@@ -58,9 +58,14 @@ async function main() {
     process.exit(1);
   }
 
-  // 3. Build profile data sections
+  // 2b. Resolve worker DID from Storacha private key (Ensue keys are DID-prefixed)
+  const identity = await import('../worker-agent/src/storacha/identity');
+  const workerDid = await identity.getAgentDid();
+  console.log(`Worker DID: ${workerDid}`);
+
+  // 3. Build profile data sections (use DID as agentId for consistency with runtime)
   const manifesto = {
-    agentId: workerId,
+    agentId: workerDid,
     name: profile.name,
     role: profile.role,
     values: profile.values,
@@ -68,7 +73,7 @@ async function main() {
   };
 
   const preferences = {
-    agentId: workerId,
+    agentId: workerDid,
     votingWeights: profile.weights,
     knowledgeNotes: [],
     updatedAt: new Date().toISOString(),
@@ -101,29 +106,48 @@ async function main() {
   });
   console.log(`  ✓ knowledge CID: ${knowledgeCid}`);
 
-  // 5. Store CID pointers in Ensue (NOT plaintext data)
-  console.log('\nStoring CID pointers in Ensue...');
+  // 5. Store in Ensue: AES-encrypted data (primary reads) + CID pointers (Storacha backup index)
+  console.log('\nStoring data in Ensue (AES-encrypted)...');
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
   // @ts-ignore — direct path import; package name not resolvable from scripts/
   const { createEnsueClient } = await import('../shared/dist/index.js');
   const ensue = createEnsueClient();
+  const { encryptForEnsue } = await import('../worker-agent/src/storacha/local-crypto');
 
-  await ensue.updateMemory(`agent/${workerId}/manifesto_cid`, manifestoCid);
-  console.log(`  ✓ agent/${workerId}/manifesto_cid → ${manifestoCid}`);
+  // AES-encrypted JSON in Ensue (primary read path — fast, reliable, private)
+  const keyPrefix = `agent/${workerDid}`;
 
-  await ensue.updateMemory(`agent/${workerId}/preferences_cid`, preferencesCid);
-  console.log(`  ✓ agent/${workerId}/preferences_cid → ${preferencesCid}`);
+  await ensue.updateMemory(`${keyPrefix}/manifesto`, await encryptForEnsue(manifesto));
+  console.log(`  ✓ ${keyPrefix}/manifesto (AES-encrypted)`);
 
-  await ensue.updateMemory(`agent/${workerId}/decisions_cid`, decisionsCid);
-  console.log(`  ✓ agent/${workerId}/decisions_cid → ${decisionsCid}`);
+  await ensue.updateMemory(`${keyPrefix}/preferences`, await encryptForEnsue(preferences));
+  console.log(`  ✓ ${keyPrefix}/preferences (AES-encrypted)`);
 
-  await ensue.updateMemory(`agent/${workerId}/knowledge_cid`, knowledgeCid);
-  console.log(`  ✓ agent/${workerId}/knowledge_cid → ${knowledgeCid}`);
+  await ensue.updateMemory(`${keyPrefix}/decisions`, await encryptForEnsue(decisions));
+  console.log(`  ✓ ${keyPrefix}/decisions (AES-encrypted)`);
 
-  console.log(`\n=== Migration complete for ${workerId} ===`);
-  console.log(`Profile data is now encrypted in Storacha; Ensue has CID pointers only.\n`);
-  console.log('NOTE: Worker delegations must include space/content/decrypt capability for reads.');
-  console.log('If reads fail, recreate delegations with: storacha delegation create <workerDID> --can space/content/decrypt ...');
+  await ensue.updateMemory(`${keyPrefix}/knowledge`, await encryptForEnsue(knowledge));
+  console.log(`  ✓ ${keyPrefix}/knowledge (AES-encrypted)`);
+
+  // CID pointers (Storacha backup index)
+  await ensue.updateMemory(`${keyPrefix}/manifesto_cid`, manifestoCid);
+  console.log(`  ✓ ${keyPrefix}/manifesto_cid → ${manifestoCid}`);
+
+  await ensue.updateMemory(`${keyPrefix}/preferences_cid`, preferencesCid);
+  console.log(`  ✓ ${keyPrefix}/preferences_cid → ${preferencesCid}`);
+
+  await ensue.updateMemory(`${keyPrefix}/decisions_cid`, decisionsCid);
+  console.log(`  ✓ ${keyPrefix}/decisions_cid → ${decisionsCid}`);
+
+  await ensue.updateMemory(`${keyPrefix}/knowledge_cid`, knowledgeCid);
+  console.log(`  ✓ ${keyPrefix}/knowledge_cid → ${knowledgeCid}`);
+
+  // Also set the display name (public, unencrypted)
+  await ensue.updateMemory(`${keyPrefix}/display_name`, profile.name);
+  console.log(`  ✓ ${keyPrefix}/display_name → ${profile.name}`);
+
+  console.log(`\n=== Migration complete for ${workerId} (${workerDid}) ===`);
+  console.log(`Profile data stored in Ensue (AES-encrypted) + Storacha (Lit-encrypted backup).\n`);
 }
 
 main().catch(err => {

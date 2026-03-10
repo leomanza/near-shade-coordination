@@ -5,11 +5,11 @@ WORKDIR /app
 # Copy shared package first
 COPY shared/package.json shared/tsconfig.json ./shared/
 COPY shared/src ./shared/src
-RUN cd shared && npm install && npm run build
+RUN cd shared && npm install --legacy-peer-deps && npm run build
 
 # Copy worker-agent
 COPY worker-agent/package.json worker-agent/tsconfig.json ./worker-agent/
-RUN cd worker-agent && npm install
+RUN cd worker-agent && npm install --legacy-peer-deps
 COPY worker-agent/src ./worker-agent/src
 RUN cd worker-agent && npm run build
 

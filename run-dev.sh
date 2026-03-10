@@ -41,6 +41,11 @@ for i in $(seq 1 "$WORKER_COUNT"); do
   PIDS+=($!)
 done
 
+# Start protocol API (port 3005)
+echo "Starting protocol-api on :3005..."
+cd "$ROOT/protocol-api" && npm run dev &
+PIDS+=($!)
+
 # Start frontend (port 3004)
 echo "Starting frontend on :3004..."
 cd "$ROOT/frontend" && npm run dev &
@@ -53,6 +58,7 @@ for i in $(seq 1 "$WORKER_COUNT"); do
   PORT=$((3000 + i))
   echo "  Worker ${i}:     http://localhost:${PORT}"
 done
+echo "  Protocol API: http://localhost:3005"
 echo "  Frontend:     http://localhost:3004"
 echo ""
 echo "Press Ctrl+C to stop all services."

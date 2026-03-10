@@ -247,15 +247,21 @@ async function performWork(config: TaskConfig): Promise<WorkResult> {
       if (!manifesto) throw new Error('Could not fetch manifesto from contract');
       console.log(`[worker] Manifesto hash: ${manifesto.hash}`);
 
-      // Load persistent agent identity
+      // Load persistent agent identity (with timeout to avoid blocking on slow IPFS gateways)
       let agentContext: string | undefined;
       try {
         console.log(`[worker] Loading agent identity...`);
-        const identity = await loadIdentity();
+        const IDENTITY_TIMEOUT_MS = 15000; // 15s max for identity loading
+        const identity = await Promise.race([
+          loadIdentity(),
+          new Promise<never>((_, reject) =>
+            setTimeout(() => reject(new Error('Identity loading timed out')), IDENTITY_TIMEOUT_MS)
+          ),
+        ]);
         agentContext = formatIdentityContext(identity);
         console.log(`[worker] Agent identity loaded (${identity.recentDecisions.length} past decisions)`);
       } catch (e) {
-        console.warn(`[worker] Agent identity unavailable, proceeding without:`, e);
+        console.warn(`[worker] Agent identity unavailable, proceeding without:`, e instanceof Error ? e.message : e);
       }
 
       console.log(`[worker] Calling AI for vote on proposal...`);
@@ -269,8 +275,17 @@ async function performWork(config: TaskConfig): Promise<WorkResult> {
 
       // Record decision for persistent history (Ensue + Storacha backup)
       try {
-        const proposalId = config.parameters?.proposalId as string
-          || `proposal-${Date.now()}`;
+        // Read the on-chain proposal ID from coordinator's Ensue key
+        // (proposalId is set by coordinator after triggerWorkers, but before workers finish voting)
+        let proposalId = config.parameters?.proposalId as string || '';
+        if (!proposalId) {
+          try {
+            const onChainId = await getEnsueClient().readMemory(MEMORY_KEYS.COORDINATOR_PROPOSAL_ID);
+            proposalId = onChainId || `proposal-${Date.now()}`;
+          } catch {
+            proposalId = `proposal-${Date.now()}`;
+          }
+        }
         const cid = await recordDecision(proposalId, proposal, voteResult.vote, voteResult.reasoning);
         if (cid) {
           console.log(`[worker] Decision persisted to Storacha: ${cid}`);
@@ -359,12 +374,20 @@ export async function initializeWorker(): Promise<void> {
       await getEnsueClient().deleteMemory(workerKeys.ERROR);
     } catch { /* ignore */ }
 
-    // Step 3: Self-register in registry (non-blocking, idempotent)
+    // Step 3: Set display name if provided (non-blocking)
+    const displayName = process.env.WORKER_DISPLAY_NAME;
+    if (displayName && _workerDID) {
+      getEnsueClient().updateMemory(`agent/${_workerDID}/display_name`, displayName)
+        .then(() => console.log(`[worker] Display name set: "${displayName}"`))
+        .catch(e => console.warn(`[worker] Display name set failed (non-fatal):`, e));
+    }
+
+    // Step 4: Self-register in registry (non-blocking, idempotent)
     ensureRegistered().catch(e =>
       console.warn(`[worker] Registration error (non-fatal):`, e)
     );
 
-    // Step 4: Initialize agent identity (non-blocking)
+    // Step 5: Initialize agent identity (non-blocking)
     initializeIdentity()
       .then(() => console.log(`[worker] Agent identity initialized`))
       .catch(e => console.warn(`[worker] Agent identity init failed (non-critical):`, e));

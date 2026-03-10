@@ -230,10 +230,11 @@ function CoordinatorContent() {
         </div>
         {workers.map((w) => {
           const status = workerStatuses?.workers[w.worker_id] || "unknown";
+          const name = workerStatuses?.workerNames?.[w.worker_id];
           return (
             <div key={w.worker_id} className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
               <StatusDot status={workerError ? "offline" : status} />
-              <span title={w.worker_id}>{truncateDid(w.worker_id)}</span>
+              <span title={w.worker_id}>{name || truncateDid(w.worker_id)}</span>
             </div>
           );
         })}
@@ -263,11 +264,13 @@ function CoordinatorContent() {
 
         {workers.map((w) => {
           const status = workerStatuses?.workers[w.worker_id] || "unknown";
+          const name = workerStatuses?.workerNames?.[w.worker_id];
           return (
             <WorkerStatusCard
               key={w.worker_id}
               worker={w}
               status={workerError ? "offline" : status}
+              displayName={name}
             />
           );
         })}
@@ -308,9 +311,11 @@ function truncateDid(id: string): string {
 function WorkerStatusCard({
   worker,
   status,
+  displayName,
 }: {
   worker: RegisteredWorker;
   status: string;
+  displayName?: string;
 }) {
   return (
     <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
@@ -319,13 +324,11 @@ function WorkerStatusCard({
           <StatusDot status={status} />
           <div>
             <h3 className="text-sm font-semibold text-zinc-100 font-mono" title={worker.worker_id}>
-              {truncateDid(worker.worker_id)}
+              {displayName || truncateDid(worker.worker_id)}
             </h3>
-            {worker.account_id && (
-              <p className="text-[10px] text-zinc-600 font-mono truncate max-w-[150px]">
-                {worker.account_id}
-              </p>
-            )}
+            <p className="text-[10px] text-zinc-600 font-mono truncate max-w-[150px]" title={worker.worker_id}>
+              {displayName ? truncateDid(worker.worker_id) : worker.account_id || ""}
+            </p>
           </div>
         </div>
         <span className="text-xs font-mono px-2 py-1 rounded-md bg-zinc-800 text-zinc-400">

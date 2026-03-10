@@ -16,12 +16,13 @@
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let _Signer: any = null;
 
+// Use indirect dynamic import to prevent tsc from compiling import() to require().
+// @storacha/client is ESM-only; require() fails with ERR_PACKAGE_PATH_NOT_EXPORTED.
+const dynamicImport = new Function('specifier', 'return import(specifier)');
+
 async function loadSigner(): Promise<any> {
   if (!_Signer) {
-    // @ts-ignore — @storacha/client is ESM-only and not in shared's package.json.
-    // The consuming package (coordinator-agent, worker-agent) has it installed.
-    // Dynamic import works at runtime because Node resolves it from the caller's context.
-    _Signer = await import('@storacha/client/principal/ed25519');
+    _Signer = await dynamicImport('@storacha/client/principal/ed25519');
   }
   return _Signer;
 }

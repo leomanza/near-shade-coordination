@@ -1,37 +1,108 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useCallback } from "react";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth";
-import PingPayCheckout from "../components/PingPayCheckout";
-import {
-  getActiveCoordinators,
-  getRegistryStats,
-  deployToPhala,
-  updateAgentEndpoint,
-  pollDeployEndpoint,
-  type RegistryCoordinator,
-  type DeployResponse,
-} from "@/lib/api";
+import { useProvisionJob } from "./hooks/useProvisionJob";
+import EntryScreen from "./components/EntryScreen";
+import ConfigScreen from "./components/ConfigScreen";
+import ProgressScreen from "./components/ProgressScreen";
+import AwaitingSignatureScreen from "./components/AwaitingSignatureScreen";
+import SuccessScreen from "./components/SuccessScreen";
+import ErrorScreen from "./components/ErrorScreen";
 
-type AgentType = "coordinator" | "worker";
+type Screen =
+  | "entry"
+  | "config"
+  | "provisioning"
+  | "awaiting_signature"
+  | "success"
+  | "error";
+
+function deriveScreen(
+  accountId: string | null,
+  jobStatus: string | undefined
+): Screen {
+  if (!accountId) return "entry";
+  if (!jobStatus) return "config";
+  switch (jobStatus) {
+    case "complete":
+      return "success";
+    case "failed":
+      return "error";
+    case "awaiting_near_signature":
+      return "awaiting_signature";
+    default:
+      return "provisioning";
+  }
+}
 
 export default function BuyPage() {
-  const { accountId, connect, disconnect, connecting } = useAuth();
-  const [tab, setTab] = useState<AgentType>(() => {
-    if (typeof window !== "undefined") {
-      return (sessionStorage.getItem("delibera_tab") as AgentType) || "worker";
-    }
-    return "worker";
-  });
+  const { accountId, connect, disconnect, connecting, signAndSendTransaction } = useAuth();
+  const { job, loading, startProvision, completeRegistration, reset } =
+    useProvisionJob();
 
-  // Persist tab selection
-  useEffect(() => {
-    sessionStorage.setItem("delibera_tab", tab);
-  }, [tab]);
+  const screen = deriveScreen(accountId, job?.status);
+
+  const handleDeploy = useCallback(
+    async (params: { coordinatorDid: string; displayName: string }) => {
+      if (!accountId) return;
+      await startProvision({
+        coordinatorDid: params.coordinatorDid,
+        displayName: params.displayName,
+        nearAccount: accountId,
+      });
+    },
+    [accountId, startProvision]
+  );
+
+  const handleSign = useCallback(async () => {
+    if (!job?.workerDid || !job?.phalaEndpoint || !job?.cvmId) return;
+
+    const REGISTRY_CONTRACT_ID =
+      process.env.NEXT_PUBLIC_REGISTRY_CONTRACT_ID ||
+      "registry.agents-coordinator.testnet";
+
+    try {
+      const result = await signAndSendTransaction({
+        receiverId: REGISTRY_CONTRACT_ID,
+        actions: [
+          {
+            type: "FunctionCall",
+            params: {
+              methodName: "register_worker",
+              args: {
+                coordinator_did: job.coordinatorDid,
+                worker_did: job.workerDid,
+                endpoint_url: job.phalaEndpoint,
+                cvm_id: job.cvmId,
+              },
+              gas: "200000000000000",
+              deposit: "100000000000000000000000",
+            },
+          },
+        ],
+      });
+
+      const txHash =
+        typeof result === "object" && result !== null
+          ? (result as any).transaction?.hash || (result as any).txHash
+          : undefined;
+
+      await completeRegistration(txHash);
+    } catch (err) {
+      console.error("Transaction signing failed:", err);
+      // Don't silently fail — let user know
+      alert(`Transaction failed: ${err instanceof Error ? err.message : "Unknown error"}. You can skip and register manually later.`);
+    }
+  }, [job, completeRegistration, signAndSendTransaction]);
+
+  const handleSkipSign = useCallback(() => {
+    completeRegistration();
+  }, [completeRegistration]);
 
   return (
-    <div className="min-h-screen bg-[#050505] p-6 md:p-10 max-w-4xl mx-auto">
+    <div className="min-h-screen bg-[#050505] p-6 md:p-10 max-w-2xl mx-auto">
       <div className="fixed inset-0 cyber-grid pointer-events-none" />
       <div className="fixed inset-0 scanlines pointer-events-none opacity-30" />
 
@@ -39,11 +110,16 @@ export default function BuyPage() {
         {/* Header */}
         <header className="mb-8">
           <div className="flex items-center justify-between mb-2">
-            <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
+            <Link
+              href="/"
+              className="flex items-center gap-3 hover:opacity-80 transition-opacity"
+            >
               <img src="/logo-iso.svg" alt="Delibera" className="h-8 w-8" />
-              <h1 className="text-xl font-bold text-zinc-100 font-mono">Delibera</h1>
+              <h1 className="text-xl font-bold text-zinc-100 font-mono">
+                Delibera
+              </h1>
             </Link>
-            {accountId ? (
+            {accountId && (
               <div className="flex items-center gap-2">
                 <span className="text-xs text-zinc-400 font-mono truncate max-w-[180px]">
                   {accountId}
@@ -55,538 +131,78 @@ export default function BuyPage() {
                   disconnect
                 </button>
               </div>
-            ) : null}
+            )}
           </div>
           <p className="text-sm text-zinc-500 font-mono">
-            Deploy Agent &middot; deploy your own coordinator or worker to Delibera
+            One-Click Worker Deployment
           </p>
         </header>
 
-        {/* Connect wallet prompt */}
-        {!accountId ? (
-          <div className="flex flex-col items-center justify-center py-20">
-            <p className="text-sm text-zinc-500 font-mono mb-6">
-              Connect your NEAR wallet to deploy an agent
-            </p>
-            <button
-              onClick={connect}
-              disabled={connecting}
-              className="px-6 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30 text-sm font-semibold text-[#00ff41] font-mono hover:bg-[#00ff41]/15 transition-all disabled:opacity-40"
-            >
-              {connecting ? "connecting..." : "connect wallet"}
-            </button>
-          </div>
-        ) : (
-          <>
-            {/* Tab selector */}
-            <div className="flex gap-2 mb-6">
-              <button
-                onClick={() => setTab("coordinator")}
-                className={`px-4 py-2 rounded text-xs font-mono transition-all border ${
-                  tab === "coordinator"
-                    ? "bg-[#00ff41]/10 border-[#00ff41]/30 text-[#00ff41]"
-                    : "border-zinc-800 text-zinc-500 hover:border-zinc-600"
-                }`}
-              >
-                Deploy Coordinator
-              </button>
-              <button
-                onClick={() => setTab("worker")}
-                className={`px-4 py-2 rounded text-xs font-mono transition-all border ${
-                  tab === "worker"
-                    ? "bg-[#00ff41]/10 border-[#00ff41]/30 text-[#00ff41]"
-                    : "border-zinc-800 text-zinc-500 hover:border-zinc-600"
-                }`}
-              >
-                Deploy Worker
-              </button>
-            </div>
+        {/* Screen router */}
+        {screen === "entry" && (
+          <EntryScreen connecting={connecting} onConnect={connect} />
+        )}
 
-            {/* Stats bar */}
-            <RegistryStats />
+        {screen === "config" && (
+          <ConfigScreen
+            accountId={accountId!}
+            loading={loading}
+            onDeploy={handleDeploy}
+          />
+        )}
 
-            {/* Form */}
-            {tab === "coordinator" ? (
-              <CoordinatorForm accountId={accountId} />
-            ) : (
-              <WorkerForm accountId={accountId} />
-            )}
-          </>
+        {screen === "provisioning" && job && (
+          <ProgressScreen
+            status={job.status}
+            step={job.step}
+            displayName={job.displayName}
+          />
+        )}
+
+        {screen === "awaiting_signature" && job && (
+          <AwaitingSignatureScreen
+            workerDid={job.workerDid!}
+            coordinatorDid={job.coordinatorDid!}
+            phalaEndpoint={job.phalaEndpoint!}
+            cvmId={job.cvmId!}
+            nearAccount={job.nearAccount!}
+            onSign={handleSign}
+            onSkip={handleSkipSign}
+          />
+        )}
+
+        {screen === "success" && job && (
+          <SuccessScreen
+            workerDid={job.workerDid!}
+            displayName={job.displayName!}
+            coordinatorDid={job.coordinatorDid!}
+            phalaEndpoint={job.phalaEndpoint}
+            cvmId={job.cvmId}
+            nearAccount={job.nearAccount!}
+            storachaPrivateKey={job.storachaPrivateKey}
+            onReset={reset}
+          />
+        )}
+
+        {screen === "error" && (
+          <ErrorScreen
+            error={job?.error}
+            workerDid={job?.workerDid}
+            cvmId={job?.cvmId}
+            dashboardUrl={job?.dashboardUrl}
+            onRetry={() => {
+              reset();
+              // User goes back to config screen
+            }}
+            onReset={reset}
+          />
         )}
 
         <footer className="mt-8 text-center text-[10px] text-zinc-700 font-mono">
-          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Storacha
+          NEAR Protocol &middot; Phala TEE &middot; Storacha &middot; Ensue
+          Network
         </footer>
       </div>
-    </div>
-  );
-}
-
-/* ─── Registry Stats ──────────────────────────────────────────────────── */
-
-function RegistryStats() {
-  const [stats, setStats] = useState<{
-    total_coordinators: number;
-    active_coordinators: number;
-    total_workers: number;
-    active_workers: number;
-  } | null>(null);
-
-  useEffect(() => {
-    getRegistryStats().then(setStats);
-  }, []);
-
-  if (!stats) return null;
-
-  return (
-    <div className="flex gap-4 mb-6 p-3 rounded border border-zinc-800 bg-[#0a0f0a]/80 text-xs font-mono text-zinc-500">
-      <span>
-        <span className="text-[#00ff41]">{stats.active_coordinators}</span> coordinators
-      </span>
-      <span>
-        <span className="text-[#00ff41]">{stats.active_workers}</span> workers
-      </span>
-      <span className="text-zinc-700">on-chain registry</span>
-    </div>
-  );
-}
-
-/* ─── Coordinator Deploy Form ─────────────────────────────────────────── */
-
-const COORD_STORAGE_KEY = "delibera_coord_form";
-const WORKER_STORAGE_KEY = "delibera_worker_form";
-
-function CoordinatorForm({ accountId }: { accountId: string }) {
-  const [name, setName] = useState("");
-  const [ensueApiKey, setEnsueApiKey] = useState("");
-  const [ensueToken, setEnsueToken] = useState("");
-  const [nearAiApiKey, setNearAiApiKey] = useState("");
-  const [sponsorAccountId, setSponsorAccountId] = useState("");
-  const [sponsorPrivateKey, setSponsorPrivateKey] = useState("");
-  const [agentContractId, setAgentContractId] = useState("");
-  const [phalaApiKey, setPhalaApiKey] = useState("");
-  const [deploying, setDeploying] = useState(false);
-  const [result, setResult] = useState<DeployResponse | null>(null);
-  const [paymentDone, setPaymentDone] = useState(false);
-  const [endpointPolling, setEndpointPolling] = useState(false);
-  const [discoveredEndpoint, setDiscoveredEndpoint] = useState<string | null>(null);
-
-  // Restore form state after PingPay redirect
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("pingpay") === "success") {
-      setPaymentDone(true);
-      try {
-        const saved = sessionStorage.getItem(COORD_STORAGE_KEY);
-        if (saved) {
-          const s = JSON.parse(saved);
-          if (s.name) setName(s.name);
-          if (s.ensueApiKey) setEnsueApiKey(s.ensueApiKey);
-          if (s.ensueToken) setEnsueToken(s.ensueToken);
-          if (s.nearAiApiKey) setNearAiApiKey(s.nearAiApiKey);
-          if (s.sponsorAccountId) setSponsorAccountId(s.sponsorAccountId);
-          if (s.sponsorPrivateKey) setSponsorPrivateKey(s.sponsorPrivateKey);
-          if (s.agentContractId) setAgentContractId(s.agentContractId);
-          if (s.phalaApiKey) setPhalaApiKey(s.phalaApiKey);
-          sessionStorage.removeItem(COORD_STORAGE_KEY);
-        }
-      } catch {}
-    }
-  }, []);
-
-  async function handleDeploy() {
-    setDeploying(true);
-    setResult(null);
-    setDiscoveredEndpoint(null);
-    const res = await deployToPhala({
-      type: "coordinator",
-      name,
-      phalaApiKey,
-      ensueApiKey,
-      ensueToken,
-      nearAiApiKey,
-      sponsorAccountId,
-      sponsorPrivateKey,
-      agentContractId: agentContractId || undefined,
-    });
-    setResult(res);
-    setDeploying(false);
-
-    if (res?.success && res.cvmId && phalaApiKey) {
-      if (res.endpointUrl) {
-        // Endpoint already registered (quick provision)
-        setDiscoveredEndpoint(res.endpointUrl);
-        if (res.name) updateAgentEndpoint(res.name, res.endpointUrl, res.cvmId, res.dashboardUrl);
-      } else {
-        // Still provisioning — poll until endpoint appears, then register
-        setEndpointPolling(true);
-        pollUntilEndpoint(res.cvmId, phalaApiKey, res.name || name, res.dashboardUrl);
-      }
-    }
-  }
-
-  async function pollUntilEndpoint(cvmId: string, apiKey: string, agentName: string, dashboardUrl?: string) {
-    for (let i = 0; i < 40; i++) {
-      await new Promise(r => setTimeout(r, 15000));
-      const url = await pollDeployEndpoint(cvmId, apiKey);
-      if (url) {
-        setDiscoveredEndpoint(url);
-        setEndpointPolling(false);
-        await updateAgentEndpoint(agentName, url, cvmId, dashboardUrl);
-        return;
-      }
-    }
-    setEndpointPolling(false);
-  }
-
-  // Persist form state so it survives PingPay redirect
-  useEffect(() => {
-    if (!paymentDone && name) {
-      sessionStorage.setItem(COORD_STORAGE_KEY, JSON.stringify({
-        name, ensueApiKey, ensueToken, nearAiApiKey, sponsorAccountId, sponsorPrivateKey, agentContractId, phalaApiKey,
-      }));
-    }
-  }, [name, ensueApiKey, ensueToken, nearAiApiKey, sponsorAccountId, sponsorPrivateKey, agentContractId, phalaApiKey, paymentDone]);
-
-  const canDeploy = name.length >= 2 && ensueApiKey && sponsorAccountId && sponsorPrivateKey;
-
-  return (
-    <div className="rounded border border-[#00ff41]/10 bg-[#0a0f0a]/80 p-6 terminal-card">
-      <h3 className="text-sm font-semibold text-zinc-100 mb-1 font-mono">
-        // Deploy Coordinator Agent
-      </h3>
-      <p className="text-[10px] text-zinc-600 mb-6">
-        A coordinator dispatches proposals to workers, tallies votes, and settles results on-chain.
-      </p>
-
-      <div className="space-y-4">
-        <Field label="Owner Account" value={accountId} disabled />
-        <Field label="Coordinator Name" value={name} onChange={setName} placeholder="my-dao" />
-
-        <div className="border-t border-zinc-800 pt-4">
-          <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-3">
-            API Keys (stored encrypted in Phala TEE)
-          </p>
-          <div className="space-y-3">
-            <Field label="Ensue API Key" value={ensueApiKey} onChange={setEnsueApiKey} placeholder="lmn_..." type="password" />
-            <Field label="Ensue Token" value={ensueToken} onChange={setEnsueToken} placeholder="(same as API key if applicable)" type="password" />
-            <Field label="NEAR AI API Key" value={nearAiApiKey} onChange={setNearAiApiKey} placeholder="sk-..." type="password" />
-            <Field label="Phala Cloud API Key (optional — skip for local)" value={phalaApiKey} onChange={setPhalaApiKey} placeholder="phak_..." type="password" />
-          </div>
-        </div>
-
-        <div className="border-t border-zinc-800 pt-4">
-          <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-3">
-            Shade Agent Config (Sponsor funds the agent account)
-          </p>
-          <div className="space-y-3">
-            <Field label="Sponsor Account ID" value={sponsorAccountId} onChange={setSponsorAccountId} placeholder="your-account.near" />
-            <Field label="Sponsor Private Key" value={sponsorPrivateKey} onChange={setSponsorPrivateKey} placeholder="ed25519:..." type="password" />
-            <Field label="Agent Contract ID (optional — defaults to platform contract)" value={agentContractId} onChange={setAgentContractId} placeholder="coordinator.agents-coordinator.near" />
-          </div>
-        </div>
-
-        <div className="border-t border-zinc-800 pt-4">
-          <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-3">
-            Payment (0.1 NEAR minimum)
-          </p>
-          {!paymentDone ? (
-            <PingPayCheckout
-              label="pay 0.1 NEAR to register"
-              amount="100000000000000000000000"
-              chain="NEAR"
-              symbol="NEAR"
-              metadata={{ type: "buy_coordinator", name, owner: accountId }}
-              className="text-xs px-4 py-2 rounded border border-[#00ff41]/30 bg-[#00ff41]/10 text-[#00ff41] font-mono hover:bg-[#00ff41]/15 transition-all disabled:opacity-40"
-            />
-          ) : (
-            <span className="text-xs text-green-400 font-mono">Payment received</span>
-          )}
-        </div>
-
-        <button
-          onClick={handleDeploy}
-          disabled={!canDeploy || deploying || !paymentDone}
-          className="w-full mt-2 px-4 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30 text-sm font-semibold text-[#00ff41] font-mono hover:bg-[#00ff41]/15 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-        >
-          {deploying ? "deploying..." : "deploy coordinator"}
-        </button>
-
-        {result && (
-          <div className={`p-3 rounded text-xs font-mono ${result.success ? "bg-green-950/30 border border-green-900/40 text-green-400" : "bg-red-950/30 border border-red-900/40 text-red-400"}`}>
-            {result.success ? (
-              result.cvmId ? (
-                <div className="space-y-1">
-                  <div>
-                    Deployed! CVM ID: {result.cvmId}
-                    {result.dashboardUrl && (
-                      <>
-                        {" — "}
-                        <a href={result.dashboardUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-green-300">
-                          view dashboard
-                        </a>
-                      </>
-                    )}
-                  </div>
-                  {discoveredEndpoint ? (
-                    <div className="text-[10px] text-emerald-400">
-                      Endpoint registered: <span className="break-all">{discoveredEndpoint}</span>
-                    </div>
-                  ) : endpointPolling ? (
-                    <div className="text-[10px] text-yellow-500 animate-pulse">
-                      Waiting for Phala endpoint URL... (checks every 15s, may take a few minutes)
-                    </div>
-                  ) : null}
-                </div>
-              ) : "Registered locally!"
-            ) : `Error: ${result.error}`}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ─── Worker Deploy Form ──────────────────────────────────────────────── */
-
-function WorkerForm({ accountId }: { accountId: string }) {
-  const [name, setName] = useState("");
-  const [ensueApiKey, setEnsueApiKey] = useState("");
-  const [ensueToken, setEnsueToken] = useState("");
-  const [storachaKey, setStorachaKey] = useState("");
-  const [storachaDelegation, setStorachaDelegation] = useState("");
-  const [storachaSpaceDid, setStorachaSpaceDid] = useState("");
-  const [nearAiApiKey, setNearAiApiKey] = useState("");
-  const [phalaApiKey, setPhalaApiKey] = useState("");
-  const [coordinatorId, setCoordinatorId] = useState<string>("");
-  const [coordinators, setCoordinators] = useState<RegistryCoordinator[]>([]);
-  const [deploying, setDeploying] = useState(false);
-  const [result, setResult] = useState<DeployResponse | null>(null);
-  const [paymentDone, setPaymentDone] = useState(false);
-  const [endpointPolling, setEndpointPolling] = useState(false);
-  const [discoveredEndpoint, setDiscoveredEndpoint] = useState<string | null>(null);
-
-  useEffect(() => {
-    getActiveCoordinators().then((c) => setCoordinators(c ?? []));
-  }, []);
-
-  // Restore form state after PingPay redirect
-  useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    if (params.get("pingpay") === "success") {
-      setPaymentDone(true);
-      try {
-        const saved = sessionStorage.getItem(WORKER_STORAGE_KEY);
-        if (saved) {
-          const s = JSON.parse(saved);
-          if (s.name) setName(s.name);
-          if (s.ensueApiKey) setEnsueApiKey(s.ensueApiKey);
-          if (s.ensueToken) setEnsueToken(s.ensueToken);
-          if (s.storachaKey) setStorachaKey(s.storachaKey);
-          if (s.storachaDelegation) setStorachaDelegation(s.storachaDelegation);
-          if (s.storachaSpaceDid) setStorachaSpaceDid(s.storachaSpaceDid);
-          if (s.nearAiApiKey) setNearAiApiKey(s.nearAiApiKey);
-          if (s.phalaApiKey) setPhalaApiKey(s.phalaApiKey);
-          if (s.coordinatorId) setCoordinatorId(s.coordinatorId);
-          sessionStorage.removeItem(WORKER_STORAGE_KEY);
-        }
-      } catch {}
-    }
-  }, []);
-
-  async function handleDeploy() {
-    setDeploying(true);
-    setResult(null);
-    setDiscoveredEndpoint(null);
-    const res = await deployToPhala({
-      type: "worker",
-      name,
-      phalaApiKey,
-      ensueApiKey,
-      ensueToken,
-      nearAiApiKey,
-      storachaAgentPrivateKey: storachaKey || undefined,
-      storachaDelegationProof: storachaDelegation || undefined,
-      storachaSpaceDid: storachaSpaceDid || undefined,
-      coordinatorId: coordinatorId || undefined,
-    });
-    setResult(res);
-    setDeploying(false);
-
-    if (res?.success && res.cvmId && phalaApiKey) {
-      if (res.endpointUrl) {
-        setDiscoveredEndpoint(res.endpointUrl);
-        if (res.name) updateAgentEndpoint(res.name, res.endpointUrl, res.cvmId, res.dashboardUrl);
-      } else {
-        setEndpointPolling(true);
-        pollUntilEndpoint(res.cvmId, phalaApiKey, res.name || name, res.dashboardUrl);
-      }
-    }
-  }
-
-  async function pollUntilEndpoint(cvmId: string, apiKey: string, agentName: string, dashboardUrl?: string) {
-    for (let i = 0; i < 40; i++) {
-      await new Promise(r => setTimeout(r, 15000));
-      const url = await pollDeployEndpoint(cvmId, apiKey);
-      if (url) {
-        setDiscoveredEndpoint(url);
-        setEndpointPolling(false);
-        await updateAgentEndpoint(agentName, url, cvmId, dashboardUrl);
-        return;
-      }
-    }
-    setEndpointPolling(false);
-  }
-
-  // Persist form state so it survives PingPay redirect
-  useEffect(() => {
-    if (!paymentDone && name) {
-      sessionStorage.setItem(WORKER_STORAGE_KEY, JSON.stringify({
-        name, ensueApiKey, ensueToken, storachaKey, storachaDelegation, storachaSpaceDid, nearAiApiKey, phalaApiKey, coordinatorId,
-      }));
-    }
-  }, [name, ensueApiKey, ensueToken, storachaKey, storachaDelegation, storachaSpaceDid, nearAiApiKey, phalaApiKey, coordinatorId, paymentDone]);
-
-  const canDeploy = name.length >= 2 && ensueApiKey && nearAiApiKey;
-
-  return (
-    <div className="rounded border border-[#00ff41]/10 bg-[#0a0f0a]/80 p-6 terminal-card">
-      <h3 className="text-sm font-semibold text-zinc-100 mb-1 font-mono">
-        // Deploy Worker Agent
-      </h3>
-      <p className="text-[10px] text-zinc-600 mb-6">
-        A worker agent deliberates on proposals using AI, maintains persistent identity via Storacha, and votes privately.
-      </p>
-
-      <div className="space-y-4">
-        <Field label="Owner Account" value={accountId} disabled />
-        <Field label="Worker Name" value={name} onChange={setName} placeholder="voter-alice" />
-
-        {/* Optional: Join a coordinator */}
-        <div>
-          <label className="block text-[10px] text-zinc-500 font-mono mb-1">
-            Join Coordinator (optional)
-          </label>
-          <select
-            value={coordinatorId}
-            onChange={(e) => setCoordinatorId(e.target.value)}
-            className="w-full px-3 py-2 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 font-mono focus:border-[#00ff41]/30 focus:outline-none"
-          >
-            <option value="">-- none (set later) --</option>
-            {coordinators.map((c) => (
-              <option key={c.coordinator_id} value={c.coordinator_id}>
-                {c.coordinator_id} (owner: {c.owner.slice(0, 20)}...)
-              </option>
-            ))}
-          </select>
-        </div>
-
-        {/* Optional: Storacha Space DID */}
-        <Field label="Storacha Space DID (optional — shared space for agent memory)" value={storachaSpaceDid} onChange={setStorachaSpaceDid} placeholder="did:key:z6Mk..." />
-
-        <div className="border-t border-zinc-800 pt-4">
-          <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-3">
-            API Keys (stored encrypted in Phala TEE)
-          </p>
-          <div className="space-y-3">
-            <Field label="Ensue API Key" value={ensueApiKey} onChange={setEnsueApiKey} placeholder="lmn_..." type="password" />
-            <Field label="Ensue Token" value={ensueToken} onChange={setEnsueToken} placeholder="(same as API key if applicable)" type="password" />
-            <Field label="NEAR AI API Key" value={nearAiApiKey} onChange={setNearAiApiKey} placeholder="sk-..." type="password" />
-            <Field label="Storacha Agent Private Key (optional)" value={storachaKey} onChange={setStorachaKey} placeholder="MgCZ..." type="password" />
-            <Field label="Storacha Delegation Proof (optional)" value={storachaDelegation} onChange={setStorachaDelegation} placeholder="mAYIEA..." type="password" />
-            <Field label="Phala Cloud API Key (optional — skip for local)" value={phalaApiKey} onChange={setPhalaApiKey} placeholder="sk-..." type="password" />
-          </div>
-        </div>
-
-        <div className="border-t border-zinc-800 pt-4">
-          <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-3">
-            Payment (0.1 NEAR minimum)
-          </p>
-          {!paymentDone ? (
-            <PingPayCheckout
-              label="pay 0.1 NEAR to register"
-              amount="100000000000000000000000"
-              chain="NEAR"
-              symbol="NEAR"
-              metadata={{ type: "buy_worker", name, owner: accountId }}
-              className="text-xs px-4 py-2 rounded border border-[#00ff41]/30 bg-[#00ff41]/10 text-[#00ff41] font-mono hover:bg-[#00ff41]/15 transition-all disabled:opacity-40"
-            />
-          ) : (
-            <span className="text-xs text-green-400 font-mono">Payment received</span>
-          )}
-        </div>
-
-        <button
-          onClick={handleDeploy}
-          disabled={!canDeploy || deploying || !paymentDone}
-          className="w-full mt-2 px-4 py-3 rounded bg-[#00ff41]/10 border border-[#00ff41]/30 text-sm font-semibold text-[#00ff41] font-mono hover:bg-[#00ff41]/15 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-        >
-          {deploying ? "deploying..." : "deploy worker"}
-        </button>
-
-        {result && (
-          <div className={`p-3 rounded text-xs font-mono ${result.success ? "bg-green-950/30 border border-green-900/40 text-green-400" : "bg-red-950/30 border border-red-900/40 text-red-400"}`}>
-            {result.success ? (
-              result.cvmId ? (
-                <div className="space-y-1">
-                  <div>
-                    Deployed! CVM ID: {result.cvmId}
-                    {result.dashboardUrl && (
-                      <>
-                        {" — "}
-                        <a href={result.dashboardUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-green-300">
-                          view dashboard
-                        </a>
-                      </>
-                    )}
-                  </div>
-                  {discoveredEndpoint ? (
-                    <div className="text-[10px] text-emerald-400">
-                      Endpoint registered: <span className="break-all">{discoveredEndpoint}</span>
-                    </div>
-                  ) : endpointPolling ? (
-                    <div className="text-[10px] text-yellow-500 animate-pulse">
-                      Waiting for Phala endpoint URL... (checks every 15s, may take a few minutes)
-                    </div>
-                  ) : null}
-                </div>
-              ) : "Registered locally!"
-            ) : `Error: ${result.error}`}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/* ─── Shared Field Component ──────────────────────────────────────────── */
-
-function Field({
-  label,
-  value,
-  onChange,
-  placeholder,
-  disabled,
-  type = "text",
-}: {
-  label: string;
-  value: string;
-  onChange?: (v: string) => void;
-  placeholder?: string;
-  disabled?: boolean;
-  type?: string;
-}) {
-  return (
-    <div>
-      <label className="block text-[10px] text-zinc-500 font-mono mb-1">{label}</label>
-      <input
-        type={type}
-        value={value}
-        onChange={onChange ? (e) => onChange(e.target.value) : undefined}
-        placeholder={placeholder}
-        disabled={disabled}
-        className="w-full px-3 py-2 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 font-mono placeholder:text-zinc-700 focus:border-[#00ff41]/30 focus:outline-none disabled:opacity-50 disabled:cursor-not-allowed"
-      />
     </div>
   );
 }

@@ -16,6 +16,10 @@
 
 import { createStorachaClient } from './identity';
 
+// Use indirect dynamic import to prevent tsc from compiling import() to require().
+// ESM-only packages (Storacha, Lit, multiformats) fail with ERR_PACKAGE_PATH_NOT_EXPORTED under require().
+const dynamicImport = new Function('specifier', 'return import(specifier)');
+
 /**
  * IPFS gateways for CID retrieval, in priority order.
  * The primary is configurable via env var; fallbacks are tried on failure.
@@ -52,13 +56,13 @@ async function loadModules() {
   if (_modules) return _modules;
   if (!_loadPromise) {
     _loadPromise = (async () => {
-      const euc = await import('@storacha/encrypt-upload-client');
-      const factories = await import(
-        '@storacha/encrypt-upload-client/factories.node' as any
+      const euc = await dynamicImport('@storacha/encrypt-upload-client');
+      const factories = await dynamicImport(
+        '@storacha/encrypt-upload-client/factories.node'
       );
-      const litClient = await import('@lit-protocol/lit-client');
-      const litAuth = await import('@lit-protocol/auth');
-      const networks = await import('@lit-protocol/networks');
+      const litClient = await dynamicImport('@lit-protocol/lit-client');
+      const litAuth = await dynamicImport('@lit-protocol/auth');
+      const networks = await dynamicImport('@lit-protocol/networks');
 
       _modules = {
         eucCreate: euc.create,
@@ -196,7 +200,7 @@ async function tryRetrieveAndDecrypt(
   cidString: string,
   decryptionConfig: any,
 ): Promise<unknown> {
-  const { CID } = await import('multiformats/cid');
+  const { CID } = await dynamicImport('multiformats/cid');
   const cid = CID.parse(cidString);
 
   const { stream, fileMetadata } =
