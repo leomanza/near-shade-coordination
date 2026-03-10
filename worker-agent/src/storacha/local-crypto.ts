@@ -32,9 +32,15 @@ export async function getAESKey(): Promise<AESKey | null> {
       let keyBytes: Buffer;
       try {
         keyBytes = Buffer.from(rawKey, 'base64');
-        if (keyBytes.length < 16) throw new Error('too short');
       } catch {
+        // base64 decode failed — try hex
         keyBytes = Buffer.from(rawKey, 'hex');
+      }
+      if (keyBytes.length < 16) {
+        throw new Error(
+          '[local-crypto] STORACHA_AGENT_PRIVATE_KEY decoded to fewer than 16 bytes — ' +
+          'check that the key is a valid base64 or hex-encoded value'
+        );
       }
 
       // HMAC-SHA256 as KDF: produce a 32-byte AES key
@@ -105,7 +111,7 @@ export async function decryptFromEnsue(stored: string | null | undefined): Promi
     );
     return JSON.parse(Buffer.from(plaintext).toString('utf8'));
   } catch (e) {
-    console.warn('[local-crypto] AES decryption failed:', e);
+    console.warn('[local-crypto] AES decryption failed:', String(e));
     return null;
   }
 }
