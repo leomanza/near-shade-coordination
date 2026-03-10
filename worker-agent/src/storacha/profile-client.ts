@@ -6,7 +6,7 @@
  *
  * Architecture:
  *   WRITE: encryptAndVault(data) → Storacha encrypted blob → CID in Ensue + JSON cache in Ensue
- *   READ:  Storacha (primary) → Ensue cache (fast fallback) → empty (new worker)
+ *   READ:  Ensue AES-encrypted cache (fast, reliable) → Storacha IPFS (cold start / disaster recovery) → empty (new worker)
  *
  * Key prefix: The worker's DID (did:key:z6Mk...) is used as the Ensue key prefix,
  * NOT the legacy WORKER_ID (worker1/worker2/worker3). This ensures each worker
@@ -164,29 +164,30 @@ export class StorachaProfileClient {
     const cached = this.cache.get('manifesto') as AgentManifesto | undefined;
     if (cached) return cached;
 
-    // 1. Try Storacha (primary persistent store)
-    if (this.useStoracha) {
-      try {
-        const ensue = await getEnsue();
-        const cidStr = await ensue.readMemory(`agent/${this.workerId}/manifesto_cid`);
-        if (cidStr && typeof cidStr === 'string' && cidStr.startsWith('baf')) {
-          const manifesto = await readFromStoracha(cidStr) as AgentManifesto;
-          this.cache.set('manifesto', manifesto);
-          // Write-through cache to Ensue for fast reads
-          writeJsonToEnsue(`agent/${this.workerId}/manifesto`, manifesto).catch(() => {});
-          return manifesto;
-        }
-      } catch (e) {
-        console.warn(`[profile:${this.workerId}] Storacha manifesto read failed:`, e);
-      }
-    }
-
-    // 2. Try Ensue JSON cache (fast fallback)
+    // 1. Try Ensue encrypted cache (fast, private, reliable)
     const ensueData = await readJsonFromEnsue(`agent/${this.workerId}/manifesto`);
     if (ensueData) {
       const manifesto = ensueData as AgentManifesto;
       this.cache.set('manifesto', manifesto);
       return manifesto;
+    }
+
+    // 2. Cold start: try Storacha IPFS (disaster recovery — may be slow/unreliable)
+    if (this.useStoracha) {
+      try {
+        const ensue = await getEnsue();
+        const cidStr = await ensue.readMemory(`agent/${this.workerId}/manifesto_cid`);
+        if (cidStr && typeof cidStr === 'string' && cidStr.startsWith('baf')) {
+          console.log(`[profile:${this.workerId}] Cold start: loading manifesto from Storacha IPFS...`);
+          const manifesto = await readFromStoracha(cidStr) as AgentManifesto;
+          this.cache.set('manifesto', manifesto);
+          // Repopulate Ensue encrypted cache so next read is fast
+          writeJsonToEnsue(`agent/${this.workerId}/manifesto`, manifesto).catch(() => {});
+          return manifesto;
+        }
+      } catch (e) {
+        console.warn(`[profile:${this.workerId}] Storacha cold read failed (non-fatal):`, e);
+      }
     }
 
     // 3. Blank identity for new workers — owner fills in via app
@@ -202,28 +203,30 @@ export class StorachaProfileClient {
     const cached = this.cache.get('preferences') as AgentPreferences | undefined;
     if (cached) return cached;
 
-    // 1. Try Storacha (primary persistent store)
-    if (this.useStoracha) {
-      try {
-        const ensue = await getEnsue();
-        const cidStr = await ensue.readMemory(`agent/${this.workerId}/preferences_cid`);
-        if (cidStr && typeof cidStr === 'string' && cidStr.startsWith('baf')) {
-          const prefs = await readFromStoracha(cidStr) as AgentPreferences;
-          this.cache.set('preferences', prefs);
-          writeJsonToEnsue(`agent/${this.workerId}/preferences`, prefs).catch(() => {});
-          return prefs;
-        }
-      } catch (e) {
-        console.warn(`[profile:${this.workerId}] Storacha preferences read failed:`, e);
-      }
-    }
-
-    // 2. Try Ensue JSON cache (fast fallback)
+    // 1. Try Ensue encrypted cache (fast, private, reliable)
     const ensueData = await readJsonFromEnsue(`agent/${this.workerId}/preferences`);
     if (ensueData) {
       const prefs = ensueData as AgentPreferences;
       this.cache.set('preferences', prefs);
       return prefs;
+    }
+
+    // 2. Cold start: try Storacha IPFS (disaster recovery — may be slow/unreliable)
+    if (this.useStoracha) {
+      try {
+        const ensue = await getEnsue();
+        const cidStr = await ensue.readMemory(`agent/${this.workerId}/preferences_cid`);
+        if (cidStr && typeof cidStr === 'string' && cidStr.startsWith('baf')) {
+          console.log(`[profile:${this.workerId}] Cold start: loading preferences from Storacha IPFS...`);
+          const prefs = await readFromStoracha(cidStr) as AgentPreferences;
+          this.cache.set('preferences', prefs);
+          // Repopulate Ensue encrypted cache so next read is fast
+          writeJsonToEnsue(`agent/${this.workerId}/preferences`, prefs).catch(() => {});
+          return prefs;
+        }
+      } catch (e) {
+        console.warn(`[profile:${this.workerId}] Storacha cold read failed (non-fatal):`, e);
+      }
     }
 
     // 3. Blank preferences for new workers
@@ -302,27 +305,29 @@ export class StorachaProfileClient {
     const cached = this.cache.get('decisions') as DecisionRecord[] | undefined;
     if (cached) return cached;
 
-    // 1. Try Storacha (primary persistent store)
+    // 1. Try Ensue encrypted cache (fast, private, reliable)
+    const ensueData = await readJsonFromEnsue(`agent/${this.workerId}/decisions`);
+    if (ensueData && Array.isArray(ensueData)) {
+      this.cache.set('decisions', ensueData);
+      return ensueData as DecisionRecord[];
+    }
+
+    // 2. Cold start: try Storacha IPFS (disaster recovery — may be slow/unreliable)
     if (this.useStoracha) {
       try {
         const ensue = await getEnsue();
         const cidStr = await ensue.readMemory(`agent/${this.workerId}/decisions_cid`);
         if (cidStr && typeof cidStr === 'string' && cidStr.startsWith('baf')) {
+          console.log(`[profile:${this.workerId}] Cold start: loading decisions from Storacha IPFS...`);
           const decisions = await readFromStoracha(cidStr) as DecisionRecord[];
           this.cache.set('decisions', decisions);
+          // Repopulate Ensue encrypted cache so next read is fast
           writeJsonToEnsue(`agent/${this.workerId}/decisions`, decisions).catch(() => {});
           return decisions;
         }
       } catch (e) {
-        console.warn(`[profile:${this.workerId}] Storacha decisions read failed:`, e);
+        console.warn(`[profile:${this.workerId}] Storacha cold read failed (non-fatal):`, e);
       }
-    }
-
-    // 2. Try Ensue JSON cache
-    const ensueData = await readJsonFromEnsue(`agent/${this.workerId}/decisions`);
-    if (ensueData && Array.isArray(ensueData)) {
-      this.cache.set('decisions', ensueData);
-      return ensueData as DecisionRecord[];
     }
 
     // 3. Empty for new workers
@@ -372,27 +377,29 @@ export class StorachaProfileClient {
     const cached = this.cache.get('knowledge') as string[] | undefined;
     if (cached) return cached;
 
-    // 1. Try Storacha (primary persistent store)
+    // 1. Try Ensue encrypted cache (fast, private, reliable)
+    const ensueData = await readJsonFromEnsue(`agent/${this.workerId}/knowledge`);
+    if (ensueData && Array.isArray(ensueData)) {
+      this.cache.set('knowledge', ensueData);
+      return ensueData as string[];
+    }
+
+    // 2. Cold start: try Storacha IPFS (disaster recovery — may be slow/unreliable)
     if (this.useStoracha) {
       try {
         const ensue = await getEnsue();
         const cidStr = await ensue.readMemory(`agent/${this.workerId}/knowledge_cid`);
         if (cidStr && typeof cidStr === 'string' && cidStr.startsWith('baf')) {
+          console.log(`[profile:${this.workerId}] Cold start: loading knowledge from Storacha IPFS...`);
           const notes = await readFromStoracha(cidStr) as string[];
           this.cache.set('knowledge', notes);
+          // Repopulate Ensue encrypted cache so next read is fast
           writeJsonToEnsue(`agent/${this.workerId}/knowledge`, notes).catch(() => {});
           return notes;
         }
       } catch (e) {
-        console.warn(`[profile:${this.workerId}] Storacha knowledge read failed:`, e);
+        console.warn(`[profile:${this.workerId}] Storacha cold read failed (non-fatal):`, e);
       }
-    }
-
-    // 2. Try Ensue JSON cache
-    const ensueData = await readJsonFromEnsue(`agent/${this.workerId}/knowledge`);
-    if (ensueData && Array.isArray(ensueData)) {
-      this.cache.set('knowledge', ensueData);
-      return ensueData as string[];
     }
 
     // 3. Empty for new workers
