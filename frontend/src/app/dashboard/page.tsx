@@ -8,6 +8,7 @@ import {
   getCoordinatorStatus,
   getWorkerStatuses,
   getCoordinatorHealth,
+  getActiveContractId,
   type OnChainState,
   type OnChainProposal,
   type ProposalState,
@@ -16,9 +17,10 @@ import {
 } from "@/lib/api";
 import Link from "next/link";
 
-const CONTRACT_ID =
-  process.env.NEXT_PUBLIC_contractId || "coordinator.agents-coordinator.testnet";
-const EXPLORER_URL = `https://testnet.nearblocks.io/address/${CONTRACT_ID}`;
+const NEAR_NETWORK = process.env.NEXT_PUBLIC_NEAR_NETWORK || "testnet";
+const EXPLORER_BASE = NEAR_NETWORK === "mainnet"
+  ? "https://nearblocks.io/address/"
+  : "https://testnet.nearblocks.io/address/";
 
 const STATE_COLORS: Record<ProposalState, string> = {
   Created: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
@@ -116,7 +118,7 @@ export default function PublicDashboard() {
           )}
           <div className="ml-auto flex items-center gap-2">
             <a
-              href={EXPLORER_URL}
+              href={`${EXPLORER_BASE}${getActiveContractId()}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-[10px] font-mono px-2 py-1 rounded-md bg-zinc-800 text-blue-400 hover:text-blue-300 hover:bg-zinc-700 transition-colors"
@@ -132,8 +134,8 @@ export default function PublicDashboard() {
           <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
             <h3 className="text-sm font-semibold text-zinc-100 mb-3">Contract</h3>
             <div className="space-y-2 text-xs">
-              <div className="font-mono text-zinc-500 truncate" title={CONTRACT_ID}>
-                {CONTRACT_ID}
+              <div className="font-mono text-zinc-500 truncate" title={getActiveContractId()}>
+                {getActiveContractId()}
               </div>
               {chainState && (
                 <>

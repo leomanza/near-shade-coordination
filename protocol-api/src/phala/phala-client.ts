@@ -34,6 +34,7 @@ export async function deployCvm(
   name: string,
   composeContent: string,
   envs: Record<string, string>,
+  port = 3001,
 ): Promise<DeployCvmResult> {
   const client = createClient({ apiKey });
 
@@ -75,7 +76,7 @@ export async function deployCvm(
   // Step 4: Construct deterministic endpoint URL from app_id
   // Pattern: https://{app_id}-{port}.{dstack_domain}
   const appId = provision.app_id ?? '';
-  const deterministicUrl = `https://${appId}-3001.${DSTACK_DOMAIN}`;
+  const deterministicUrl = `https://${appId}-${port}.${DSTACK_DOMAIN}`;
   console.log(`[phala] Deterministic endpoint URL: ${deterministicUrl}`);
 
   // Quick health check (3 attempts × 5s) — container may still be booting

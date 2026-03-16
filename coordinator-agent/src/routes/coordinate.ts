@@ -69,7 +69,7 @@ async function getWorkerDIDs(): Promise<string[]> {
       return trimmed.split(':')[0];
     });
   }
-  return ['worker1', 'worker2', 'worker3'];
+  return [];
 }
 
 /**

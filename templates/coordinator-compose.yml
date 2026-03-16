@@ -6,17 +6,24 @@ services:
       - "3000:3000"
     environment:
       - PORT=3000
-      - ENSUE_API_KEY=${ENSUE_API_KEY}
-      - ENSUE_TOKEN=${ENSUE_TOKEN}
-      # Shade Agent v2 config
-      - AGENT_CONTRACT_ID=${AGENT_CONTRACT_ID}
-      - SPONSOR_ACCOUNT_ID=${SPONSOR_ACCOUNT_ID}
-      - SPONSOR_PRIVATE_KEY=${SPONSOR_PRIVATE_KEY}
-      # Contract for view calls
-      - NEXT_PUBLIC_contractId=${AGENT_CONTRACT_ID}
-      - POLL_INTERVAL=5000
+      # Storacha identity for coordinator agent persistent memory
+      - COORDINATOR_STORACHA_PRIVATE_KEY=${COORDINATOR_STORACHA_PRIVATE_KEY}
+      - COORDINATOR_STORACHA_SPACE_DID=${COORDINATOR_STORACHA_SPACE_DID}
+      - COORDINATOR_STORACHA_DELEGATION_BASE64=${COORDINATOR_STORACHA_DELEGATION_BASE64}
+      # Coordinator identity
+      - COORDINATOR_DID=${COORDINATOR_DID}
+      # NEAR identity (account that owns the coordinator contract)
+      - NEAR_ACCOUNT_ID=${NEAR_ACCOUNT_ID}
+      # Network config
       - NEAR_NETWORK=${NEAR_NETWORK}
-      - NEAR_RPC_JSON=${NEAR_RPC_JSON}
+      - NEAR_RPC_URL=${NEAR_RPC_URL}
+      - REGISTRY_CONTRACT_ID=${REGISTRY_CONTRACT_ID}
+      # Worker configuration
+      - MIN_WORKERS=${MIN_WORKERS}
+      - MAX_WORKERS=${MAX_WORKERS}
+      # Ensue coordination memory (per-coordinator org — inactive until claimed)
+      - ENSUE_API_KEY=${ENSUE_API_KEY}
+      - ENSUE_ORG_NAME=${ENSUE_ORG_NAME}
     volumes:
       - /var/run/dstack.sock:/var/run/dstack.sock
     restart: always

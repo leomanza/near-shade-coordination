@@ -5,7 +5,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://protocol-api-product
 let _coordinatorUrl = process.env.NEXT_PUBLIC_COORDINATOR_URL || "https://coordinator-agent-production-49b6.up.railway.app";
 
 export function setActiveCoordinatorUrl(url: string) { _coordinatorUrl = url; }
-function getCoordinatorUrl(): string { return _coordinatorUrl; }
+export function getCoordinatorUrl(): string { return _coordinatorUrl; }
 
 /** In-memory cache of agent endpoints (fetched from registry contract via protocol API) */
 let _agentEndpointsCache: Record<string, string> = {};
@@ -136,15 +136,16 @@ export async function getWorkerStatuses(): Promise<WorkerStatuses | null> {
     return { workers, workerNames, timestamp: raw.timestamp, source: "registry" };
   }
 
-  // Legacy env-fallback response: workers is already Record<string, string>
-  return { workers: raw.workers ?? {}, timestamp: raw.timestamp, source: "env_fallback" };
+  // Env-fallback: coordinator has no registry data — return empty.
+  // The fallback workers (worker1/2/3) are hardcoded placeholders, not real agents.
+  return { workers: {}, timestamp: raw.timestamp, source: "env_fallback" };
 }
 
 export async function getPendingCoordinations(): Promise<PendingCoordinations | null> {
   return safeFetch<PendingCoordinations>(`${getCoordinatorUrl()}/api/coordinate/pending`);
 }
 
-export async function getCoordinatorHealth(): Promise<{ status: string } | null> {
+export async function getCoordinatorHealth(): Promise<{ status: string; contractId?: string; mode?: string } | null> {
   return safeFetch(`${getCoordinatorUrl()}/`);
 }
 
@@ -255,21 +256,9 @@ export async function getRegisteredWorkers(): Promise<{ workers: RegisteredWorke
     return { workers, activeCount: workers.filter((w) => w.active).length };
   }
 
-  // Env-fallback response: workers is Record<string, string>
-  if (raw.workers && typeof raw.workers === "object" && !Array.isArray(raw.workers)) {
-    const workers: RegisteredWorker[] = Object.entries(raw.workers as Record<string, string>).map(
-      ([id, status]) => ({
-        worker_id: id,
-        account_id: null,
-        registered_at: 0,
-        registered_by: "",
-        active: status !== "offline",
-      })
-    );
-    return { workers, activeCount: workers.filter((w) => w.active).length };
-  }
-
-  return null;
+  // Env-fallback: coordinator has no registry data — return empty.
+  // The fallback workers (worker1/2/3) are hardcoded placeholders, not real agents.
+  return { workers: [], activeCount: 0 };
 }
 
 export async function registerWorker(
@@ -318,8 +307,15 @@ const NEAR_NETWORK = process.env.NEXT_PUBLIC_NEAR_NETWORK || "testnet";
 const NEAR_RPC = NEAR_NETWORK === "mainnet"
   ? "https://rpc.fastnear.com"
   : "https://test.rpc.fastnear.com";
-const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
+
+const DEFAULT_CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
   || (NEAR_NETWORK === "mainnet" ? "coordinator.agents-coordinator.near" : "coordinator.agents-coordinator.testnet");
+
+// Active coordinator contract — updated when a coordinator is selected in the dashboard
+let _contractId = DEFAULT_CONTRACT_ID;
+export function setActiveContractId(id: string) { _contractId = id; }
+export function getActiveContractId(): string { return _contractId; }
+export { DEFAULT_CONTRACT_ID };
 
 async function nearViewCall<T>(method: string, args: Record<string, unknown> = {}): Promise<T | null> {
   try {
@@ -333,7 +329,7 @@ async function nearViewCall<T>(method: string, args: Record<string, unknown> = {
         params: {
           request_type: "call_function",
           finality: "final",
-          account_id: CONTRACT_ID,
+          account_id: _contractId,
           method_name: method,
           args_base64: btoa(JSON.stringify(args)),
         },

@@ -5,6 +5,7 @@ node_modules/
 frontend/.next/
 coordinator-contract/target/
 registry-contract/target/
+factory-contract/target/
 shared/dist/
 coordinator-agent/node_modules/
 coordinator-agent/dist/

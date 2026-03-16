@@ -1,16 +1,15 @@
 "use client";
 
 import StatusDot from "./StatusDot";
-import type { CoordinatorStatus } from "@/lib/api";
+import { getActiveContractId, type CoordinatorStatus } from "@/lib/api";
 
 interface CoordinatorPanelProps {
   status: CoordinatorStatus | null;
   online: boolean;
 }
 
-const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId || "coordinator.agents-coordinator.testnet";
-
 export default function CoordinatorPanel({ status, online }: CoordinatorPanelProps) {
+  const CONTRACT_ID = getActiveContractId();
   const currentStatus = online ? (status?.status || "idle") : "offline";
   // Only show tally during active coordination or if completed recently (same session)
   // Hide stale "completed" tallies when coordinator is idle with no active proposal

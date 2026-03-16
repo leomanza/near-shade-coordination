@@ -57,5 +57,14 @@ if [ "${BUILD_COORDINATOR:-1}" = "1" ]; then
     "$ROOT/coordinator-contract/target/near/coordinator_contract.wasm"
 fi
 
+if [ "${BUILD_FACTORY:-1}" = "1" ]; then
+  # Factory embeds coordinator WASM — build coordinator first (BUILD_COORDINATOR=1)
+  build_contract "factory-contract" "$ROOT/factory-contract"
+  mkdir -p "$ROOT/factory-contract/target/near"
+  optimize_wasm "factory" \
+    "$ROOT/factory-contract/target/wasm32-unknown-unknown/release/coordinator_factory.wasm" \
+    "$ROOT/factory-contract/target/near/coordinator_factory.wasm"
+fi
+
 echo ""
 echo "All contracts built successfully!"

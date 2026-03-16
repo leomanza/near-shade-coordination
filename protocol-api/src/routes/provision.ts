@@ -8,6 +8,7 @@
 
 import { Hono } from 'hono';
 import { deployCvm, watchForEndpoint } from '../phala/phala-client';
+import { provisionCoordinatorEnsueOrg } from '../lib/ensue';
 import * as crypto from 'crypto';
 
 const provision = new Hono();
@@ -17,6 +18,7 @@ const provision = new Hono();
 type ProvisionStatus =
   | 'generating_identity'
   | 'creating_space'
+  | 'provisioning_ensue'
   | 'preparing_phala'
   | 'deploying_phala'
   | 'waiting_for_url'
@@ -27,6 +29,7 @@ type ProvisionStatus =
 
 interface ProvisionJob {
   id: string;
+  role: 'worker' | 'coordinator';
   workerDid: string;
   storachaPrivateKey: string;
   coordinatorDid: string;
@@ -39,6 +42,14 @@ interface ProvisionJob {
   dashboardUrl?: string;
   error?: string;
   createdAt: number;
+  // Coordinator-specific
+  minWorkers?: number;
+  maxWorkers?: number;
+  contractAddress?: string;   // factory-created contract — known before Phala deploy (Option A)
+  ensueApiKey?: string;
+  ensueOrgName?: string;
+  ensueClaimUrl?: string;
+  ensueVerificationCode?: string;
 }
 
 // In-memory job store (sufficient for hackathon — single-process)
@@ -48,20 +59,21 @@ function updateJob(jobId: string, status: ProvisionStatus, extra?: Partial<Provi
   const job = jobs.get(jobId);
   if (!job) return;
   job.status = status;
-  job.step = statusToStep(status);
+  job.step = statusToStep(status, job.role);
   if (extra) Object.assign(job, extra);
 }
 
-function statusToStep(status: ProvisionStatus): string {
+function statusToStep(status: ProvisionStatus, role: 'worker' | 'coordinator' = 'worker'): string {
   switch (status) {
-    case 'generating_identity': return 'Generating worker identity';
+    case 'generating_identity': return role === 'coordinator' ? 'Generating coordinator identity' : 'Generating worker identity';
     case 'creating_space': return 'Creating Storacha space';
+    case 'provisioning_ensue': return 'Provisioning coordination memory';
     case 'preparing_phala': return 'Preparing Phala deployment';
     case 'deploying_phala': return 'Deploying to Phala TEE';
     case 'waiting_for_url': return 'Waiting for public URL (3-10 min)';
     case 'awaiting_near_signature': return 'Waiting for NEAR wallet signature';
-    case 'registering': return 'Registering on NEAR';
-    case 'complete': return 'Worker active';
+    case 'registering': return role === 'coordinator' ? 'Registering coordinator on NEAR' : 'Registering on NEAR';
+    case 'complete': return role === 'coordinator' ? 'Coordinator active' : 'Worker active';
     case 'failed': return 'Deployment failed';
     default: return status;
   }
@@ -298,6 +310,129 @@ async function provisionWorker(job: ProvisionJob): Promise<void> {
   }
 }
 
+// ── Coordinator Compose Template ──
+
+function coordinatorComposeContent(): string {
+  return `services:
+  coordinator:
+    image: leomanza/delibera-coordinator:latest
+    platform: linux/amd64
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - LOCAL_MODE
+      - COORDINATOR_STORACHA_PRIVATE_KEY
+      - COORDINATOR_STORACHA_SPACE_DID
+      - COORDINATOR_STORACHA_DELEGATION_BASE64
+      - COORDINATOR_DID
+      - NEAR_ACCOUNT_ID
+      - NEAR_NETWORK
+      - NEAR_RPC_URL
+      - REGISTRY_CONTRACT_ID
+      - MIN_WORKERS
+      - MAX_WORKERS
+      - ENSUE_API_KEY
+      - ENSUE_ORG_NAME
+      - NEXT_PUBLIC_contractId
+    volumes:
+      - /var/run/dstack.sock:/var/run/dstack.sock
+    restart: always
+`;
+}
+
+// ── Coordinator Provisioning Flow ──
+
+async function provisionCoordinator(job: ProvisionJob): Promise<void> {
+  try {
+    // Step 1: Generate coordinator identity (same key type as worker)
+    updateJob(job.id, 'generating_identity');
+    const { workerDid: coordinatorDid, privateKeyString } = await generateWorkerIdentity();
+    job.workerDid = coordinatorDid; // reuse workerDid field for the coordinator's DID
+    job.storachaPrivateKey = privateKeyString;
+    console.log(`[provision/coordinator] Generated DID: ${coordinatorDid.substring(0, 24)}...`);
+
+    // Step 2: Create Storacha delegation for the coordinator (uses coordinator's own space)
+    updateJob(job.id, 'creating_space');
+    const { spaceDid: storachaSpaceDid, delegationProof: storachaDelegation } =
+      await createWorkerDelegation(coordinatorDid);
+    console.log(`[provision/coordinator] Storacha delegation created for space ${storachaSpaceDid}`);
+
+    // Step 3: Provision Ensue org for coordination memory
+    updateJob(job.id, 'provisioning_ensue');
+    const ensueOrg = await provisionCoordinatorEnsueOrg(coordinatorDid);
+    // CRITICAL: store api key immediately — returned only once
+    job.ensueApiKey = ensueOrg.apiKey;
+    job.ensueOrgName = ensueOrg.orgName;
+    job.ensueClaimUrl = ensueOrg.claimUrl;
+    job.ensueVerificationCode = ensueOrg.verificationCode;
+    console.log(`[provision/coordinator] Ensue org provisioned: ${ensueOrg.orgName}`);
+
+    // Step 4: Prepare Phala deployment
+    updateJob(job.id, 'preparing_phala');
+    const phalaApiKey = process.env.PHALA_API_KEY;
+    if (!phalaApiKey) {
+      throw new Error('PHALA_API_KEY not configured on server');
+    }
+
+    const envVars: Record<string, string> = {
+      PORT: '3000',
+      // Run in LOCAL_MODE: starts Ensue-based coordination loop without ShadeAgent.
+      // ShadeAgent TEE attestation requires AGENT_CONTRACT_ID which doesn't exist
+      // until after the factory tx (chicken-and-egg). Add ShadeAgent support later.
+      LOCAL_MODE: 'true',
+      NEAR_NETWORK: process.env.NEAR_NETWORK || 'testnet',
+      NEAR_RPC_URL: process.env.NEAR_RPC_URL || 'https://test.rpc.fastnear.com',
+      REGISTRY_CONTRACT_ID: process.env.REGISTRY_CONTRACT_ID || 'registry.agents-coordinator.testnet',
+      COORDINATOR_DID: coordinatorDid,
+      COORDINATOR_STORACHA_PRIVATE_KEY: privateKeyString,
+      COORDINATOR_STORACHA_SPACE_DID: storachaSpaceDid,
+      COORDINATOR_STORACHA_DELEGATION_BASE64: storachaDelegation,
+      NEAR_ACCOUNT_ID: job.nearAccount,
+      MIN_WORKERS: String(job.minWorkers ?? 1),
+      MAX_WORKERS: String(job.maxWorkers ?? 10),
+      ENSUE_API_KEY: ensueOrg.apiKey,
+      ENSUE_ORG_NAME: ensueOrg.orgName,
+      // Coordinator contract address (factory-created before Phala deploy — Option A)
+      NEXT_PUBLIC_contractId: job.contractAddress || '',
+    };
+
+    // Step 5: Deploy to Phala
+    updateJob(job.id, 'deploying_phala');
+    const suffix = Date.now().toString(36).slice(-4);
+    const cvmName = `delibera-coord-${job.displayName.replace(/[^a-zA-Z0-9-]/g, '-').toLowerCase()}-${suffix}`;
+    const composeContent = coordinatorComposeContent();
+
+    const result = await deployCvm(phalaApiKey, cvmName, composeContent, envVars, 3000);
+    job.cvmId = result.cvmId;
+    job.dashboardUrl = result.dashboardUrl;
+    console.log(`[provision/coordinator] CVM created: ${result.cvmId}`);
+
+    const endpointUrl = result.endpointUrl || result.deterministicUrl;
+
+    if (endpointUrl) {
+      // Step 6: Wait for coordinator to be healthy
+      updateJob(job.id, 'waiting_for_url');
+      job.phalaEndpoint = endpointUrl;
+
+      const healthy = await waitForHealthy(endpointUrl, 40, 15000);
+      if (healthy) {
+        console.log(`[provision/coordinator] Coordinator is healthy at ${endpointUrl}`);
+      } else {
+        console.warn(`[provision/coordinator] Not healthy after 10min — continuing (URL: ${endpointUrl})`);
+      }
+
+      // Step 7: Ready for wallet signatures (factory deploy + registry register)
+      updateJob(job.id, 'awaiting_near_signature', { phalaEndpoint: endpointUrl });
+    } else {
+      updateJob(job.id, 'failed', { error: 'Could not determine endpoint URL' });
+    }
+  } catch (error: any) {
+    console.error(`[provision/coordinator] Job ${job.id} failed:`, error);
+    updateJob(job.id, 'failed', { error: error?.message || 'Unknown error' });
+  }
+}
+
 // ── Routes ──
 
 /**
@@ -318,13 +453,14 @@ provision.post('/worker', async (c) => {
   const jobId = crypto.randomUUID();
   const job: ProvisionJob = {
     id: jobId,
+    role: 'worker',
     workerDid: '', // Set during provisioning
     storachaPrivateKey: '', // Set during provisioning
     coordinatorDid: body.coordinatorDid,
     displayName: body.displayName,
     nearAccount: body.nearAccount,
     status: 'generating_identity',
-    step: statusToStep('generating_identity'),
+    step: statusToStep('generating_identity', 'worker'),
     createdAt: Date.now(),
   };
 
@@ -351,14 +487,15 @@ provision.get('/status/:jobId', (c) => {
     return c.json({ error: 'Job not found' }, 404);
   }
 
+  const revealSecrets = job.status === 'awaiting_near_signature' || job.status === 'complete';
+
   return c.json({
     jobId: job.id,
+    role: job.role,
     status: job.status,
     step: job.step,
     workerDid: job.workerDid || undefined,
-    storachaPrivateKey: job.status === 'awaiting_near_signature' || job.status === 'complete'
-      ? job.storachaPrivateKey
-      : undefined, // Only reveal key when ready
+    storachaPrivateKey: revealSecrets ? job.storachaPrivateKey : undefined,
     phalaEndpoint: job.phalaEndpoint,
     cvmId: job.cvmId,
     dashboardUrl: job.dashboardUrl,
@@ -366,6 +503,13 @@ provision.get('/status/:jobId', (c) => {
     displayName: job.displayName,
     nearAccount: job.nearAccount,
     error: job.error,
+    // Coordinator-specific (only revealed when ready)
+    minWorkers: job.minWorkers,
+    maxWorkers: job.maxWorkers,
+    contractAddress: job.contractAddress,
+    ensueOrgName: revealSecrets ? job.ensueOrgName : undefined,
+    ensueClaimUrl: revealSecrets ? job.ensueClaimUrl : undefined,
+    ensueVerificationCode: revealSecrets ? job.ensueVerificationCode : undefined,
   });
 });
 
@@ -410,6 +554,105 @@ provision.post('/register', async (c) => {
     workerDid: job.workerDid,
     phalaEndpoint: job.phalaEndpoint,
     txHash: body.txHash,
+  });
+});
+
+/**
+ * POST /api/provision/coordinator
+ * Start a new coordinator provisioning job.
+ */
+provision.post('/coordinator', async (c) => {
+  const body = await c.req.json<{
+    displayName: string;
+    nearAccount: string;
+    minWorkers: number;
+    maxWorkers: number;
+    contractAddress?: string;
+  }>();
+
+  if (!body.displayName || !body.nearAccount) {
+    return c.json({ error: 'displayName and nearAccount are required' }, 400);
+  }
+
+  const minWorkers = Number(body.minWorkers ?? 1);
+  const maxWorkers = Number(body.maxWorkers ?? 10);
+
+  if (minWorkers < 1) {
+    return c.json({ error: 'minWorkers must be >= 1' }, 400);
+  }
+  if (maxWorkers < minWorkers) {
+    return c.json({ error: 'maxWorkers must be >= minWorkers' }, 400);
+  }
+
+  const jobId = crypto.randomUUID();
+  const job: ProvisionJob = {
+    id: jobId,
+    role: 'coordinator',
+    workerDid: '', // coordinator DID — set during provisioning
+    storachaPrivateKey: '',
+    coordinatorDid: '', // self-referential after generation
+    displayName: body.displayName,
+    nearAccount: body.nearAccount,
+    minWorkers,
+    maxWorkers,
+    contractAddress: body.contractAddress,  // factory-created before Phala deploy
+    status: 'generating_identity',
+    step: statusToStep('generating_identity', 'coordinator'),
+    createdAt: Date.now(),
+  };
+
+  jobs.set(jobId, job);
+
+  provisionCoordinator(job).catch((e) => {
+    console.error(`[provision/coordinator] Unhandled error in job ${jobId}:`, e);
+    updateJob(jobId, 'failed', { error: e?.message || 'Unknown error' });
+  });
+
+  return c.json({ jobId, status: 'provisioning' });
+});
+
+/**
+ * POST /api/provision/coordinator-register
+ * Mark coordinator registration complete (after both wallet txs are signed).
+ * The frontend handles:
+ *   tx #1 — call factory `create_coordinator(prefix, min_workers, max_workers)`
+ *   tx #2 — call registry `register_coordinator(...)`
+ */
+provision.post('/coordinator-register', async (c) => {
+  const body = await c.req.json<{
+    jobId: string;
+    contractAddress?: string; // {prefix}.coord-factory.agents-coordinator.testnet
+    txHash?: string;
+  }>();
+
+  if (!body.jobId) {
+    return c.json({ error: 'jobId is required' }, 400);
+  }
+
+  const job = jobs.get(body.jobId);
+  if (!job) {
+    return c.json({ error: 'Job not found' }, 404);
+  }
+
+  if (job.role !== 'coordinator') {
+    return c.json({ error: 'Job is not a coordinator job' }, 400);
+  }
+
+  if (job.status !== 'awaiting_near_signature') {
+    return c.json({ error: `Job is in status '${job.status}', expected 'awaiting_near_signature'` }, 400);
+  }
+
+  updateJob(body.jobId, 'complete');
+
+  return c.json({
+    status: 'complete',
+    coordinatorDid: job.workerDid,
+    phalaEndpoint: job.phalaEndpoint,
+    contractAddress: body.contractAddress,
+    txHash: body.txHash,
+    ensueOrgName: job.ensueOrgName,
+    ensueClaimUrl: job.ensueClaimUrl,
+    ensueVerificationCode: job.ensueVerificationCode,
   });
 });
 
