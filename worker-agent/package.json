@@ -17,12 +17,22 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.15.0",
+    "@lit-protocol/auth": "^8.2.3",
+    "@lit-protocol/lit-client": "^8.3.1",
+    "@lit-protocol/networks": "^8.4.1",
     "@near-shade-coordination/shared": "file:../shared",
+    "@storacha/client": "^2.0.7",
+    "@storacha/encrypt-upload-client": "^1.1.78",
     "cors": "^2.8.5",
     "dotenv": "^16.5.0",
+    "ethers": "^6.16.0",
     "hono": "^4.8.4",
+    "near-api-js": "^5.1.1",
+    "near-seed-phrase": "^0.2.1",
     "nova-sdk-js": "^1.0.3",
-    "openai": "^6.18.0"
+    "openai": "^6.18.0",
+    "viem": "^2.46.3",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

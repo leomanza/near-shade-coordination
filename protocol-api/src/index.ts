@@ -5,6 +5,7 @@ import { Hono } from 'hono';
 import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
 import deployRoute from './routes/deploy';
+import provisionRoute from './routes/provision';
 import agentsRoute from './routes/agents';
 import workersRoute from './routes/workers';
 import paymentsRoute from './routes/payments';
@@ -21,6 +22,7 @@ app.get('/', (c) =>
 );
 
 app.route('/api/deploy', deployRoute);
+app.route('/api/provision', provisionRoute);
 app.route('/api/agents', agentsRoute);
 app.route('/api/workers', workersRoute);
 app.route('/api/payments', paymentsRoute);

@@ -1,8 +1,8 @@
-# Delibera -- Privacy-Preserving Multi-Agent DAO Coordination on NEAR
+# Delibera — Privacy-Preserving Multi-Agent DAO Coordination on NEAR
 
-A decentralized platform where independent AI agents deliberate and vote on DAO proposals. Individual reasoning stays private off-chain in Ensue shared memory, while only aggregate tallies are settled on the NEAR blockchain. Anyone can deploy their own coordinator or worker agents through the platform -- each running autonomously inside Phala TEE containers.
+A decentralized platform where independent AI agents deliberate and vote on DAO proposals. Individual reasoning stays private off-chain in Ensue shared memory, while only aggregate tallies are settled on the NEAR blockchain. Anyone can deploy their own coordinator or worker agents through the platform — each running autonomously inside Phala TEE containers.
 
-Built with [NEAR Shade Agents](https://docs.near.org/ai/shade-agents/getting-started/introduction), [NEAR AI](https://near.ai/), [Ensue Memory Network](https://ensue.dev), [Nova](https://nova-sdk.com), [Phala TEE](https://phala.network/), and [PingPay](https://pingpay.io/).
+Built with [NEAR Shade Agents](https://docs.near.org/ai/shade-agents/getting-started/introduction), [NEAR AI](https://near.ai/), [Ensue Memory Network](https://ensue.dev), [Storacha](https://storacha.network), [Lit Protocol](https://litprotocol.com/), [Zama fhEVM](https://docs.zama.ai/fhevm), [Flow VRF](https://docs.flow.com), [Phala TEE](https://phala.network/), and [PingPay](https://pingpay.io/).
 
 ## How It Works
 
@@ -20,9 +20,10 @@ Built with [NEAR Shade Agents](https://docs.near.org/ai/shade-agents/getting-sta
 6. Coordinator reads all votes from Ensue, tallies the result
 7. Only the aggregate tally (Approved/Rejected count) goes on-chain
 8. Contract resumes with the final decision
+9. Deliberation transcript is encrypted and backed up to Storacha → Filecoin
 ```
 
-Individual AI reasoning and votes never touch the blockchain -- they stay private in Ensue shared memory. NEAR AI verification proofs cryptographically link each vote to a specific model running inside verified TEE hardware.
+Individual AI reasoning and votes never touch the blockchain — they stay private in Ensue shared memory. NEAR AI verification proofs cryptographically link each vote to a specific model running inside verified TEE hardware.
 
 ## Architecture
 
@@ -44,46 +45,39 @@ Individual AI reasoning and votes never touch the blockchain -- they stay privat
            │    - Monitors completion     │
            │    - Tallies votes           │
            │    - Settles on-chain        │
+           │    - Backs up to Storacha    │
+           │    - Archives to Filecoin    │
            └──┬──────────┬──────────┬────┘
          read │    read  │    read  │
            ┌──┴──────────┴──────────┴────┐
-           │   Ensue Shared Memory        │
-           │   (off-chain, permissioned)  │
+           │   Ensue Shared Memory (Hot)  │
            └──┬──────────┬──────────┬────┘
          write│    write │    write │
         ┌─────┴──┐ ┌─────┴──┐ ┌─────┴──┐
         │Voter 1 │ │Voter 2 │ │Voter N │──── Phala TEE (production)
         │(:3001) │ │(:3002) │ │(:300N) │
-        └───┬────┘ └───┬────┘ └───┬────┘
-            │          │          │
-       read/│write     │          │
-            └──────────┴──────────┘
-           ┌──────────────────────────────┐
-           │   Nova (Encrypted Storage)   │
-           │   (long-term agent identity) │
-           │   - Manifesto & values       │
-           │   - Voting preferences       │
-           │   - Decision history         │
-           │   - AES-256-GCM encrypted    │
-           │   - IPFS-backed via TEE      │
-           └──────────────────────────────┘
+        │did:key │ │did:key │ │did:key │
+        └────────┘ └────────┘ └────────┘
 
-           ┌─────────────────────────────┐
-           │  Protocol API (:3005)       │
-           │  - Agent deploy (Phala)     │
-           │  - PingPay payments         │
-           │  - Registry reads/writes    │
-           │  - Worker registration      │
-           └─────────────────────────────┘
+    ┌─────────────────────────────────────────────┐
+    │   Storacha (Warm — Encrypted Persistence)   │
+    │   + Lit threshold encryption                │
+    │   + Auto Filecoin archival (Cold)           │
+    └─────────────────────────────────────────────┘
 
-           ┌─────────────────────────────┐
-           │  Frontend (:3004)           │
-           │  - Public dashboard         │
-           │  - Deploy/buy agents        │
-           │  - Coordinator panel        │
-           │  - On-chain state viewer    │
-           └─────────────────────────────┘
+    ┌────────────────────┐  ┌─────────────────────┐
+    │ Zama fhEVM         │  │ Flow VRF            │
+    │ FHE blind voting   │  │ Fair jury selection  │
+    └────────────────────┘  └─────────────────────┘
 ```
+
+## Tiered Storage
+
+| Tier | System | Data | Lifetime |
+|------|--------|------|----------|
+| Hot | Ensue Memory Network | Real-time task state, agent working memory | Session |
+| Warm | Storacha + Lit Protocol | Encrypted transcripts, session summaries | Persistent |
+| Cold | Filecoin (Proof of Spacetime) | Finalized deliberation records | Permanent |
 
 ## Data Privacy Model
 
@@ -94,15 +88,12 @@ Individual AI reasoning and votes never touch the blockchain -- they stay privat
 | Aggregate tally (N Approved, M Rejected) | NEAR blockchain | Public |
 | Final decision (Approved/Rejected) | NEAR blockchain | Public |
 | Worker submission hashes (nullifier) | NEAR blockchain | Public |
-| Coordinator & worker endpoint URLs | NEAR blockchain (registry) | Public |
 | Individual AI votes | Ensue shared memory | Private |
 | AI reasoning / deliberation | Ensue shared memory | Private |
-| Agent identity & knowledge | Ensue shared memory | Private |
 | NEAR AI verification proofs | Ensue shared memory | Private |
-| Processing metadata | Ensue shared memory | Private |
-| Agent manifesto & values | Nova (encrypted IPFS) | Private (per-worker) |
-| Voting preferences & weights | Nova (encrypted IPFS) | Private (per-worker) |
-| Decision history | Nova (encrypted IPFS) | Private (per-worker) |
+| Encrypted transcripts | Storacha (Lit-encrypted) | Private (threshold decryption) |
+| Filecoin archival records | Storacha + Filecoin | Private (encrypted at rest) |
+| FHE-encrypted ballots (V2) | Zama fhEVM chain | Encrypted (FHE) |
 
 ## Project Structure
 
@@ -115,324 +106,28 @@ near-shade-coordination/
 ├── coordinator-agent/           # Orchestrator agent (TypeScript + Hono)
 │   └── src/
 │       ├── index.ts             # Shade Agent v2 init, local/production modes
-│       ├── routes/coordinate.ts # Coordination API (trigger, status, proposals)
-│       └── monitor/             # Ensue polling, vote aggregation, contract resume
-├── worker-agent/                # AI voter agent template (TypeScript + Hono)
+│       ├── routes/coordinate.ts # Coordination API (trigger, status, select-jury)
+│       ├── monitor/             # Ensue polling, vote tally, contract resume
+│       ├── storacha/            # Storacha client, vault (Lit encryption), Ensue backup
+│       ├── filecoin/            # IPNI verification, Filecoin archival records
+│       └── vrf/                 # Flow VRF jury selection
+├── worker-agent/                # AI voter agent (TypeScript + Hono, runs as 3 instances)
 │   └── src/
 │       ├── workers/ai-voter.ts  # NEAR AI integration (DeepSeek-V3.1 + verification)
 │       ├── workers/task-handler.ts  # Task execution, Ensue status tracking
-│       ├── nova/nova-client.ts     # Nova SDK client (encrypted IPFS uploads/retrieval)
-│       └── nova/agent-identity.ts  # Persistent identity (manifesto, preferences, history)
-├── protocol-api/                # Central platform API (TypeScript + Hono)
-│   └── src/
-│       ├── routes/deploy.ts     # Phala CVM deploy + registry contract updates
-│       ├── routes/agents.ts     # Agent endpoint reads/writes (on-chain registry)
-│       ├── routes/workers.ts    # Worker registration (coordinator contract)
-│       ├── routes/payments.ts   # PingPay checkout + webhooks
-│       └── phala/phala-client.ts # Phala Cloud SDK + endpoint discovery
+│       └── storacha/            # Storacha identity (did:key), agent profiles
+├── contracts/voting/            # Zama fhEVM blind voting contract (Solidity)
+│   ├── contracts/DeliberaVoting.sol
+│   └── test/DeliberaVoting.ts
 ├── shared/                      # Shared library (@near-shade-coordination/shared)
 │   └── src/
 │       ├── ensue-client.ts      # Ensue JSON-RPC 2.0 over SSE client
 │       ├── constants.ts         # Memory key paths
 │       └── types.ts             # Shared TypeScript interfaces
 ├── frontend/                    # Next.js 15 dashboard + deploy UI
-│   └── src/
-│       ├── app/page.tsx         # Public dashboard (on-chain state, proposals)
-│       ├── app/coordinator/     # Coordinator management panel
-│       ├── app/worker/          # Worker management panel
-│       └── lib/api.ts           # API client (protocol + coordinator + NEAR RPC)
-├── templates/                   # Docker Compose templates for Phala deployment
-│   ├── coordinator-compose.yml  # Coordinator agent container definition
-│   └── worker-compose.yml       # Worker agent container definition
+├── .claude/skills/              # Claude Code skills (storacha-vault, flow-vrf, etc.)
 └── scripts/                     # Development utilities
 ```
-
-## Smart Contracts
-
-### Coordinator Contract
-
-**Address:** `coordinator.agents-coordinator.testnet` (testnet) | `coordinator.agents-coordinator.near` (mainnet)
-**Owner:** `agents-coordinator.testnet`
-
-The coordinator contract manages the full proposal lifecycle using NEAR's yield/resume pattern:
-
-- **Manifesto** -- DAO guidelines stored on-chain that AI agents reference when voting
-- **Yield/Resume** -- Contract pauses execution with `promise_yield_create`, waits for off-chain agents to deliberate, then resumes with `promise_yield_resume` when the coordinator submits the tally
-- **Proposal states** -- `Created` -> `WorkersCompleted` -> `Finalized` (or `TimedOut` after ~200 blocks)
-- **Nullifier pattern** -- Worker submission hashes (SHA256 of result) recorded on-chain to prevent double-voting, without revealing actual votes
-- **Hash verification** -- SHA256 on config and result payloads to detect tampering between off-chain and on-chain
-
-Key methods:
-
-| Method | Type | Description |
-|--------|------|-------------|
-| `submit_proposal` | change | Submit a new proposal (creates yielded promise) |
-| `resume_with_result` | change | Coordinator submits aggregate tally to resume contract |
-| `set_manifesto` | change | Owner sets/updates the DAO manifesto |
-| `register_worker` | change | Register a worker agent on-chain |
-| `get_manifesto` | view | Read the current manifesto |
-| `get_all_proposals` | view | List all proposals with state |
-| `get_registered_workers` | view | List registered worker agents |
-
-### Registry Contract
-
-**Address:** `registry.agents-coordinator.testnet` (testnet)
-**Owner:** `agents-coordinator.testnet`
-
-The registry contract is the platform-level directory of all coordinators and workers across the Delibera ecosystem. It tracks deployment metadata and endpoint URLs on-chain.
-
-Storage uses V2 keys (ordinals 2, 3) with the following entry schemas:
-
-**CoordinatorEntry:**
-```
-coordinator_id, owner, contract_id, phala_cvm_id,
-ensue_configured, endpoint_url, created_at, active
-```
-
-**WorkerEntry:**
-```
-worker_id, owner, coordinator_id, phala_cvm_id,
-nova_group_id, endpoint_url, created_at, active
-```
-
-Key methods:
-
-| Method | Type | Description |
-|--------|------|-------------|
-| `register_coordinator` | change (payable, 0.1 NEAR) | Register a new coordinator |
-| `register_worker` | change (payable, 0.1 NEAR) | Register a new worker (auto-generates `{name}-{seq}` ID) |
-| `update_coordinator` | change | Update coordinator metadata (endpoint_url, phala_cvm_id, etc.) |
-| `update_worker` | change | Update worker metadata |
-| `list_active_coordinators` | view | All active coordinators with endpoint URLs |
-| `list_active_workers` | view | All active workers |
-| `list_workers_by_coordinator` | view | Workers linked to a specific coordinator |
-| `get_stats` | view | Total/active counts for coordinators and workers |
-
-The `endpoint_url` field is set automatically after a successful Phala deployment -- the Protocol API polls for the public URL and writes it to the registry once the agent is operational.
-
-## Deploy (Buy) Flow
-
-The platform allows anyone to deploy a new coordinator or worker agent through a self-service buy flow. The sequence is:
-
-```
-User fills deploy form (name, API keys, type)
-       │
-       ▼
-Frontend creates PingPay checkout session ──► PingPay hosted payment page
-       │                                              │
-       │                                     User pays (USDC on NEAR)
-       │                                              │
-       ▼                                              ▼
-Payment confirmed ◄────────────── PingPay webhook (HMAC-verified)
-       │
-       ▼
-Protocol API: POST /api/deploy
-       │
-       ├─► 1. Register on registry contract (register_coordinator / register_worker)
-       │      - Requires 0.1 NEAR deposit (paid by platform signer)
-       │      - Returns the on-chain entry with generated IDs
-       │
-       ├─► 2. Register on coordinator contract (workers only, if coordinator specified)
-       │      - Links the worker to a specific coordinator for vote dispatching
-       │
-       ├─► 3. Deploy to Phala Cloud (if Phala API key provided)
-       │      a. Provision CVM (docker compose + TEE instance type)
-       │      b. Encrypt env vars with TEE public key
-       │      c. Commit CVM provision (creates the container)
-       │      d. Poll for public endpoint URL (up to 10 attempts, 3s apart)
-       │         GET /api/v1/cvms/{id} → public_urls[].app
-       │      e. Wait for app ready (up to 20 attempts, 10s apart)
-       │         GET {endpoint}/ → health check returns "running"
-       │
-       └─► 4. Update registry contract with endpoint_url + phala_cvm_id
-              - Calls update_coordinator / update_worker on-chain
-              - Frontend can now resolve the agent's live URL from on-chain data
-```
-
-### Endpoint URL Lifecycle
-
-Agent endpoint URLs are stored on-chain in the registry contract, not in Ensue. This means:
-
-- **After deploy:** The Protocol API writes the Phala endpoint URL to the registry contract once the agent health check passes
-- **Frontend resolution:** The dashboard reads `endpoint_url` from `list_active_coordinators` / `list_active_workers` via NEAR RPC view calls
-- **Manual override:** The `PUT /api/agents/:agentId/endpoint` route allows updating an agent's endpoint URL (calls `update_coordinator`/`update_worker` on-chain)
-- **Persistence:** Endpoint URLs survive across frontend sessions since they're stored on NEAR blockchain
-
-### Phala Endpoint Discovery
-
-When deploying to Phala Cloud, the system automatically discovers the public endpoint using the pattern from shade-agent-cli:
-
-1. After CVM creation, poll `GET /api/v1/cvms/{id}` with `X-API-Key` header
-2. Look for non-empty `public_urls[].app` entries
-3. Once a URL is found, ping it repeatedly until the health check responds with `"running"`
-4. Write the verified endpoint URL to the registry contract
-
-## AI Voting Flow
-
-Each voter agent follows this process:
-
-1. **Fetch manifesto** -- Reads the DAO manifesto from the NEAR contract via RPC
-2. **Load agent identity** -- Persistent identity from Ensue: values, guidelines, voting weights, past decisions
-3. **AI deliberation** -- Calls NEAR AI API (`cloud-api.near.ai/v1`) with manifesto + proposal + agent context
-4. **Structured vote** -- DeepSeek-V3.1 uses function calling (`dao_vote` tool) to return `{vote: "Approved"|"Rejected", reasoning: "..."}`
-5. **Verification proof** -- Fetches NEAR AI cryptographic proof:
-   - `GET /v1/signature/{chatId}` -- TEE-signed hash of request+response (proves which model was used)
-   - `GET /v1/attestation/report` -- Links signing address to verified TEE hardware (Intel TDX / NVIDIA)
-6. **Write to Ensue** -- Vote, reasoning, and verification proof written to private namespace
-7. **Coordinator tallies** -- Reads all worker votes, counts Approved vs Rejected
-8. **On-chain settlement** -- Only `{approved: N, rejected: M, decision: "Approved"}` goes on-chain
-
-## Services
-
-### Protocol API (`:3005`)
-
-Central platform service for deployment, payments, and agent registry operations. Runs as a single instance.
-
-| Method | Route | Description |
-|--------|-------|-------------|
-| POST | `/api/deploy` | Deploy coordinator or worker to Phala + register on-chain |
-| GET | `/api/deploy/status/:cvmId` | Check Phala CVM deployment status |
-| GET | `/api/agents/endpoints` | All agent endpoint URLs from registry contract |
-| GET | `/api/agents/:agentId/endpoint` | Specific agent's endpoint |
-| PUT | `/api/agents/:agentId/endpoint` | Update an agent's endpoint URL on-chain |
-| GET | `/api/workers/registered` | Registered workers from coordinator contract |
-| POST | `/api/workers/register` | Register a worker on coordinator contract |
-| DELETE | `/api/workers/:workerId` | Remove a worker |
-| POST | `/api/payments/checkout` | Create PingPay checkout session |
-| POST | `/api/payments/webhook` | Receive PingPay payment events |
-
-### Coordinator Agent (`:3000`)
-
-Per-DAO orchestrator. Each coordinator manages its own set of workers and proposals.
-
-| Method | Route | Description |
-|--------|-------|-------------|
-| GET | `/` | Health check (reports mode: local/production/degraded) |
-| GET | `/api/coordinate/status` | Current coordinator status + latest tally |
-| GET | `/api/coordinate/workers` | Worker statuses from Ensue |
-| GET | `/api/coordinate/pending` | Pending coordination requests |
-| POST | `/api/coordinate/trigger` | Trigger a vote on a proposal |
-| POST | `/api/coordinate/reset` | Reset Ensue memory state |
-| GET | `/api/coordinate/proposals` | Proposal history |
-| GET | `/api/coordinate/proposals/:id` | Proposal detail with worker results |
-
-### Worker Agent (`:3001-300N`)
-
-Independent AI voter agents. Each worker has its own persistent identity and deliberates autonomously.
-
-| Method | Route | Description |
-|--------|-------|-------------|
-| GET | `/api/task/health` | Worker health check |
-| POST | `/api/task/execute` | Execute a task (vote on proposal) |
-| GET | `/api/knowledge/identity` | Worker's agent identity (manifesto, preferences, history) |
-| POST | `/api/knowledge/feed` | Feed knowledge notes or voting weights |
-| POST | `/api/knowledge/manifesto` | Update agent manifesto (name, role, values) |
-
-## Ensue Memory Network
-
-[Ensue](https://ensue.dev) is the off-chain coordination layer -- a permissioned key-value memory network that agents use to share state without direct communication.
-
-### Why Ensue
-
-Agents running in Trusted Execution Environments (TEEs) can't directly talk to each other. Ensue provides a shared memory space where they read/write data asynchronously, coordinated by key namespaces.
-
-### Protocol
-
-- **JSON-RPC 2.0 over SSE** -- All operations are POST to `https://api.ensue-network.ai/`
-- **Server-Sent Events** -- Responses arrive as `text/event-stream` with `data: {jsonrpc payload}`
-- **Bearer auth** -- API key in the `Authorization` header
-- **Operations:** `create_memory`, `read_memory`, `update_memory`, `delete_memory`, `list_keys`
-
-### Data Layout
-
-```
-coordination/
-  tasks/
-    worker1/
-      status       "idle" | "pending" | "processing" | "completed" | "failed"
-      result       { workerId, vote, reasoning, processingTime, verificationProof }
-      timestamp    1770497735701
-      error        null | "error message"
-    worker2/...
-    workerN/...
-  coordinator/
-    status         "idle" | "monitoring" | "aggregating" | "completed"
-    tally          { approved: 2, rejected: 1, decision: "Approved", ... }
-    proposal_id    1
-  config/
-    task_definition  { type: "vote", parameters: { proposal: "..." } }
-```
-
-### Security Model
-
-| Agent | Access | Namespace |
-|-------|--------|-----------|
-| Voter N | write | `coordination/tasks/workerN/*` |
-| Coordinator | read | `coordination/tasks/*` (all voters) |
-| Coordinator | write | `coordination/coordinator/*` |
-| Frontend | read | `coordination/*` (display only) |
-
-## Nova -- Persistent Agent Identity
-
-[Nova](https://nova-sdk.com) is the long-term encrypted storage layer for worker agent identities. While Ensue handles real-time coordination (task status, vote results, tallies), Nova handles persistent memory that survives across sessions and proposals.
-
-### What Nova Stores
-
-Each worker agent has its own private Nova group (cryptographically isolated via AES-256-GCM keys managed inside the TEE):
-
-- **Agent manifesto** -- Name, role, core values, and decision guidelines that define the agent's personality
-- **Voting preferences** -- Weighted factors (community benefit, technical feasibility, sustainability, etc.) that influence how the agent evaluates proposals
-- **Knowledge notes** -- Accumulated knowledge fed to the agent over time by its owner
-- **Decision history** -- Record of past votes and reasoning, giving the agent memory of its own decisions
-
-### How It Works
-
-1. On startup, each worker initializes its Nova group and loads (or seeds) its identity
-2. Before each vote, the worker loads its full identity context from Nova -- manifesto, preferences, and recent decisions
-3. This context is passed to the AI model alongside the proposal and DAO manifesto
-4. After voting, the decision is recorded back to Nova for future reference
-5. Owners can update an agent's manifesto, values, and voting weights via the `/api/knowledge/*` endpoints
-
-### Why Two Memory Layers
-
-| Layer | Purpose | Scope | Encryption |
-|-------|---------|-------|------------|
-| Ensue | Real-time coordination (task dispatch, vote collection, tallies) | Shared across coordinator + workers | Permissioned access |
-| Nova | Long-term agent identity (manifesto, preferences, history) | Per-worker private groups | AES-256-GCM via TEE |
-
-Nova always runs on NEAR mainnet regardless of which network the smart contracts are on. The `nova_group_id` for each worker is tracked in the on-chain registry contract.
-
-## Production Vision
-
-When fully deployed, Delibera operates as a permissionless platform:
-
-1. **Anyone can create a coordinator** -- Deploy a new DAO coordinator through the buy flow. It gets its own Phala TEE container, NEAR contract integration, and Ensue namespace. The coordinator appears in the on-chain registry.
-
-2. **Anyone can add workers** -- Deploy independent voter agents that join an existing coordinator. Each worker has its own persistent AI identity, knowledge base, and voting history. Workers deliberate autonomously based on their unique values and the DAO manifesto.
-
-3. **Fully autonomous operation** -- Once deployed, coordinators automatically detect on-chain proposals, dispatch to workers, collect votes, and settle results. No human intervention needed.
-
-4. **Verifiable AI inference** -- Every AI vote includes a NEAR AI verification proof: a TEE-signed attestation linking the vote to a specific model running inside verified hardware. This proves which model was used without exposing the actual vote content.
-
-5. **Privacy by design** -- Individual votes and reasoning never leave the private Ensue namespace. Only aggregate tallies (N approved, M rejected) are recorded on-chain. The coordinator itself runs in a TEE, so even the tally aggregation happens in trusted hardware.
-
-6. **On-chain discoverability** -- The registry contract serves as a public directory. Anyone can query `list_active_coordinators` or `list_active_workers` to discover running agents, their endpoint URLs, and which coordinator they belong to.
-
-## Technology Stack
-
-| Component | Technology | Purpose |
-|-----------|-----------|---------|
-| Coordinator Contract | Rust + near-sdk 5.7.0 | On-chain settlement, yield/resume |
-| Registry Contract | Rust + near-sdk 5.17.2 | Platform-wide agent directory |
-| AI Model | DeepSeek-V3.1 via NEAR AI | Proposal deliberation and voting |
-| AI Verification | NEAR AI Signature + Attestation API | Cryptographic proof of model identity |
-| Agents | TypeScript + Hono 4.8 | HTTP servers for coordination |
-| Shared Memory | Ensue Memory Network | Off-chain agent coordination |
-| Agent Identity | Nova SDK (encrypted IPFS via TEE) | Persistent long-term agent memory |
-| TEE Runtime | Phala Network + Shade Agent SDK v2 | Trusted execution environment |
-| Payments | PingPay (USDC on NEAR) | Agent deployment checkout |
-| Frontend | Next.js 15 + React 19 | Dashboard, deploy UI, on-chain viewer |
-| WASM Build | nightly Rust + build-std + wasm-opt | NEAR-compatible WASM (no bulk-memory) |
 
 ## Quick Start
 
@@ -440,7 +135,7 @@ When fully deployed, Delibera operates as a permissionless platform:
 
 - Node.js 22+
 - Rust + wasm32-unknown-unknown target (for contract builds)
-- NEAR testnet account with credentials in keychain
+- NEAR testnet account with credentials
 - [Ensue API key](https://ensue.dev)
 - [NEAR AI API key](https://cloud-api.near.ai) (for AI voting)
 
@@ -450,18 +145,58 @@ When fully deployed, Delibera operates as a permissionless platform:
 cd shared && npm install && npm run build
 ```
 
-### 2. Configure Environment
+### 2. Generate Storacha Identity
 
-Each service has its own `.env.development.local`. Key variables:
+Each agent needs a sovereign `did:key` identity for Storacha:
+
+```bash
+# Install Storacha CLI
+npm install -g @storacha/cli
+
+# Login (one time)
+storacha login you@example.com
+
+# Create a space (one time)
+storacha space create delibera-v2
+storacha space provision --provider did:web:storacha.network
+
+# Generate agent keys (one per agent)
+storacha key create
+# → Private key: MgCZG7...  (STORACHA_AGENT_PRIVATE_KEY)
+# → Agent DID:   did:key:z6Mk...
+
+# Create delegation for the agent
+storacha delegation create <AGENT_DID> \
+  --can 'space/blob/add' --can 'space/index/add' \
+  --can 'upload/add' --can 'upload/list' \
+  --can 'space/content/decrypt' \
+  -o delegation.car
+base64 delegation.car
+# → STORACHA_DELEGATION_PROOF value
+```
+
+### 3. Configure Environment
 
 **Coordinator agent** (`coordinator-agent/.env.development.local`):
 ```bash
 PORT=3000
-LOCAL_MODE=true                    # Skip TEE registration for local dev
+LOCAL_MODE=true
 ENSUE_API_KEY=your-ensue-api-key
+ENSUE_TOKEN=your-ensue-token
 NEAR_NETWORK=testnet
 NEAR_ACCOUNT_ID=agents-coordinator.testnet
+NEAR_SEED_PHRASE="your seed phrase"
 NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
+NEAR_API_KEY=your-near-ai-key
+WORKERS=worker1:3001,worker2:3002,worker3:3003
+
+# Storacha (encrypted persistence)
+STORACHA_AGENT_PRIVATE_KEY=MgCZG7...
+STORACHA_DELEGATION_PROOF=base64-encoded-delegation
+STORACHA_SPACE_DID=did:key:z6Mk...
+
+# Lit Protocol (threshold encryption)
+LIT_NETWORK=datil
 ```
 
 **Workers** (`worker-agent/.env.worker1.local`, `.env.worker2.local`, `.env.worker3.local`):
@@ -469,58 +204,42 @@ NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
 WORKER_ID=worker1                  # worker2, worker3
 PORT=3001                          # 3002, 3003
 ENSUE_API_KEY=your-ensue-api-key
-NEAR_AI_API_KEY=your-near-ai-key   # or NEAR_API_KEY
-NOVA_ACCOUNT_ID=your-nova-account  # Nova mainnet account
-NOVA_API_KEY=your-nova-api-key
-NOVA_GROUP_ID=your-nova-group-id   # Per-worker private group
+ENSUE_TOKEN=your-ensue-token
+NEAR_API_KEY=your-near-ai-key
 NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
-```
 
-**Protocol API** (`protocol-api/.env.development.local`):
-```bash
-PORT=3005
-NEAR_NETWORK=testnet
-NEAR_ACCOUNT_ID=agents-coordinator.testnet
-NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
-NEXT_PUBLIC_REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
-PINGPAY_API_KEY=your-pingpay-key   # optional, for payments
+# Storacha (unique per worker)
+STORACHA_AGENT_PRIVATE_KEY=MgCZG7...
+STORACHA_DELEGATION_PROOF=base64-encoded-delegation
+STORACHA_SPACE_DID=did:key:z6Mk...
 ```
 
 **Frontend** (`frontend/.env.local`):
 ```bash
 NEXT_PUBLIC_COORDINATOR_URL=http://localhost:3000
-NEXT_PUBLIC_API_URL=http://localhost:3005
 NEXT_PUBLIC_NEAR_NETWORK=testnet
 NEXT_PUBLIC_contractId=coordinator.agents-coordinator.testnet
 NEXT_PUBLIC_REGISTRY_CONTRACT_ID=registry.agents-coordinator.testnet
 ```
 
-### 3. Start All Services
+### 4. Start All Services
 
 ```bash
-# Terminal 1 -- Coordinator
+# All at once:
+./run-dev.sh
+
+# Or individually:
 cd coordinator-agent && npm install && npm run dev
-
-# Terminal 2 -- Worker 1
-cd worker-agent && npm run dev:worker1
-
-# Terminal 3 -- Worker 2
-cd worker-agent && npm run dev:worker2
-
-# Terminal 4 -- Worker 3
-cd worker-agent && npm run dev:worker3
-
-# Terminal 5 -- Protocol API
-cd protocol-api && npm install && npm run dev
-
-# Terminal 6 -- Frontend
-cd frontend && npm install && npm run dev
+cd worker-agent && npm run dev:worker1   # Terminal 2
+cd worker-agent && npm run dev:worker2   # Terminal 3
+cd worker-agent && npm run dev:worker3   # Terminal 4
+cd frontend && npm install && npm run dev # Terminal 5
 ```
 
-### 4. Submit a Proposal
+### 5. Submit a Proposal
 
 ```bash
-# Via the coordinator API
+# Trigger a vote
 curl -X POST http://localhost:3000/api/coordinate/trigger \
   -H 'Content-Type: application/json' \
   -d '{"taskConfig":{"type":"vote","parameters":{"proposal":"Fund a developer grant program for 10,000 NEAR"},"timeout":30000}}'
@@ -529,53 +248,126 @@ curl -X POST http://localhost:3000/api/coordinate/trigger \
 curl http://localhost:3000/api/coordinate/status
 curl http://localhost:3000/api/coordinate/workers
 
+# Select a jury (Flow VRF)
+curl -X POST http://localhost:3000/api/coordinate/select-jury \
+  -H 'Content-Type: application/json' \
+  -d '{"pool":["alice.near","bob.near","carol.near","dave.near","eve.near"],"jurySize":3}'
+
 # Or open the dashboard at http://localhost:3004
 ```
 
-## Building Contracts
+## Smart Contracts
 
-### WASM Build (NEAR-compatible)
+### Coordinator Contract
 
-NEAR testnet does not support bulk-memory or sign-ext WebAssembly features. Use the nightly toolchain with `build-std` to produce compatible WASM:
+**Address:** `coordinator.agents-coordinator.testnet`
 
-```bash
-# Registry contract (near-sdk 5.17.2)
-cd registry-contract
+| Method | Type | Description |
+|--------|------|-------------|
+| `submit_proposal` | change | Submit a new proposal (creates yielded promise) |
+| `resume_with_result` | change | Coordinator submits aggregate tally |
+| `set_manifesto` | change | Owner sets/updates the DAO manifesto |
+| `register_worker` | change | Register a worker agent on-chain |
+| `get_manifesto` | view | Read the current manifesto |
+| `get_all_proposals` | view | List all proposals with state |
 
-PATH="$HOME/.rustup/toolchains/nightly-2025-01-07-aarch64-apple-darwin/bin:$HOME/.cargo/bin:/usr/bin:/bin" \
-RUSTFLAGS='-C link-arg=-s -C target-cpu=mvp -C target-feature=-bulk-memory,-sign-ext,-multivalue,-reference-types' \
-cargo build --target wasm32-unknown-unknown --release \
-  -Z build-std=std,panic_abort \
-  -Z build-std-features=panic_immediate_abort
+### Registry Contract
 
-# Optimize (use --mvp-features to prevent wasm-opt from reintroducing sign-ext)
-wasm-opt -Oz --mvp-features --enable-mutable-globals \
-  target/wasm32-unknown-unknown/release/registry_contract.wasm \
-  -o target/registry_contract_optimized.wasm
+**Address:** `registry.agents-coordinator.testnet`
 
-# Validate
-wasm-tools validate --features=mvp,mutable-global target/registry_contract_optimized.wasm
+| Method | Type | Description |
+|--------|------|-------------|
+| `register_coordinator` | change (0.1 NEAR) | Register a new coordinator |
+| `register_worker` | change (0.1 NEAR) | Register a new worker |
+| `list_active_coordinators` | view | All active coordinators |
+| `list_active_workers` | view | All active workers |
+
+## V2 Features
+
+### Zama fhEVM Blind Voting
+
+For high-stakes proposals, votes are cast as FHE-encrypted integers on a Zama fhEVM chain. The encrypted tally is invisible until a Phala TEE finalizes the vote.
+
+```
+contracts/voting/DeliberaVoting.sol
+- castVote(proposalId, encryptedVote, inputProof)  → FHE.add() accumulates
+- finalize(proposalId)                              → TEE-only, after deadline
+- publishResult(proposalId, approved, rejected)     → TEE publishes plaintext
 ```
 
-### Deploy to Testnet
+### Flow VRF Jury Selection
 
-```bash
-near contract deploy registry.agents-coordinator.testnet \
-  use-file target/registry_contract_optimized.wasm \
-  with-init-call migrate json-args '{"admin":"agents-coordinator.testnet"}' \
-  prepaid-gas '100 Tgas' attached-deposit '0 NEAR' \
-  network-config testnet sign-with-keychain send
+Fair jury selection using Flow blockchain's verifiable randomness beacon:
+
 ```
+POST /api/coordinate/select-jury
+Body: { pool: ["alice.near", ...], jurySize: 3, deliberationId: "delib-1" }
+Response: { jury: [...], vrfSeed: "123...", vrfProof: "flow-testnet:..." }
+```
+
+Same seed always produces the same jury — verifiable and auditable.
+
+### Storacha + Lit Encrypted Persistence
+
+All deliberation data is encrypted with Lit Protocol threshold keys before upload to Storacha:
+
+```
+Vote complete → Encrypt with Lit ACC → Upload to Storacha → Auto Filecoin deal
+                                              ↓
+                                    CID: bafyrei...
+                                    Deal ref: fil-f3cac8e5...
+```
+
+## Services
+
+### Coordinator Agent (`:3000`)
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/` | Health check |
+| GET | `/api/coordinate/status` | Current status + latest tally |
+| GET | `/api/coordinate/workers` | Worker statuses from Ensue |
+| POST | `/api/coordinate/trigger` | Trigger a vote on a proposal |
+| POST | `/api/coordinate/reset` | Reset Ensue memory state |
+| POST | `/api/coordinate/select-jury` | Flow VRF jury selection |
+| POST | `/api/coordinate/verify-jury` | Verify a jury selection |
+
+### Worker Agent (`:3001-300N`)
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/api/task/health` | Worker health check |
+| POST | `/api/task/execute` | Execute a task (vote on proposal) |
+| GET | `/api/knowledge/identity` | Agent identity + Storacha DID |
+| GET | `/api/knowledge/health` | Storacha identity health check |
+
+## Technology Stack
+
+| Component | Technology | Purpose |
+|-----------|-----------|---------|
+| Coordinator Contract | Rust + near-sdk 5.7.0 | On-chain settlement, yield/resume |
+| Registry Contract | Rust + near-sdk 5.17.2 | Platform-wide agent directory |
+| AI Model | DeepSeek-V3.1 via NEAR AI | Proposal deliberation and voting |
+| Agents | TypeScript + Hono 4.8 | HTTP servers for coordination |
+| Hot Memory | Ensue Memory Network | Off-chain agent coordination |
+| Warm Storage | Storacha + Lit Protocol | Encrypted persistent storage |
+| Cold Archival | Filecoin (via Storacha) | Permanent storage (Proof of Spacetime) |
+| Confidential Voting | Zama fhEVM | FHE-encrypted ballots |
+| Verifiable Randomness | Flow VRF | Fair jury selection |
+| Agent Identity | did:key + UCAN delegation | Sovereign agent identity |
+| TEE Runtime | Phala Network | Trusted execution environment |
+| Payments | PingPay (USDC on NEAR) | Agent deployment checkout |
+| Frontend | Next.js 15 + React 19 | Dashboard and deploy UI |
 
 ## Deployments
 
 ### Testnet Contracts
 
-| Contract | Account | Description |
-|----------|---------|-------------|
-| Coordinator | `coordinator.agents-coordinator.testnet` | Proposal lifecycle, yield/resume |
-| Registry | `registry.agents-coordinator.testnet` | Agent directory with endpoint URLs |
-| Owner | `agents-coordinator.testnet` | Admin account for both contracts |
+| Contract | Account |
+|----------|---------|
+| Coordinator | `coordinator.agents-coordinator.testnet` |
+| Registry | `registry.agents-coordinator.testnet` |
+| Owner | `agents-coordinator.testnet` |
 
 ### NEAR RPC
 
@@ -584,24 +376,17 @@ near contract deploy registry.agents-coordinator.testnet \
 | Testnet | `https://test.rpc.fastnear.com` |
 | Mainnet | `https://rpc.fastnear.com` |
 
-### Railway (Demo)
-
-| Service | URL |
-|---------|-----|
-| Frontend | https://frontend-production-a40a1.up.railway.app |
-| Protocol API | https://protocol-api-production.up.railway.app |
-| Coordinator | https://coordinator-agent-production-49b6.up.railway.app |
-
 ## References
 
-- [NEAR Shade Agents Documentation](https://docs.near.org/ai/shade-agents/getting-started/introduction)
+- [NEAR Shade Agents](https://docs.near.org/ai/shade-agents/getting-started/introduction)
 - [NEAR AI API](https://cloud-api.near.ai)
-- [NEAR AI Verification (Signature + Attestation)](https://docs.near.ai/cloud/verification/chat)
 - [Ensue Memory Network](https://ensue.dev)
-- [Nova SDK (Encrypted Agent Storage)](https://nova-sdk.com)
-- [Phala Network TEE / Cloud](https://phala.network/)
+- [Storacha](https://storacha.network)
+- [Lit Protocol](https://litprotocol.com/)
+- [Zama fhEVM](https://docs.zama.ai/fhevm)
+- [Flow VRF](https://docs.flow.com)
+- [Phala Network TEE](https://phala.network/)
 - [PingPay Payments](https://pingpay.io/)
-- [AI DAO Tutorial](https://docs.near.org/ai/shade-agents/tutorials/ai-dao/overview)
 
 ## License
 

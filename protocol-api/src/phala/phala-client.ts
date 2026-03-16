@@ -10,6 +10,7 @@ import { createClient, encryptEnvVars } from '@phala/cloud';
 
 const CLOUD_URL = 'https://cloud.phala.com';
 const PHALA_API = 'https://cloud-api.phala.network/api/v1';
+const DSTACK_DOMAIN = 'dstack-pha-prod5.phala.network';
 
 export interface DeployCvmResult {
   cvmId: string;
@@ -17,6 +18,7 @@ export interface DeployCvmResult {
   dashboardUrl: string;
   appId: string;
   endpointUrl?: string;
+  deterministicUrl?: string;
 }
 
 /**
@@ -32,6 +34,7 @@ export async function deployCvm(
   name: string,
   composeContent: string,
   envs: Record<string, string>,
+  port = 3001,
 ): Promise<DeployCvmResult> {
   const client = createClient({ apiKey });
 
@@ -70,17 +73,38 @@ export async function deployCvm(
   const vmUuid = (result as any).vm_uuid ?? String((result as any).id);
   console.log(`[phala] CVM created: ${vmUuid}`);
 
-  // Step 4: Quick poll for public endpoint URL (3 attempts × 5s = 15s).
-  // If not ready yet, caller should use watchForEndpoint() in the background.
-  const endpointUrl = await getAppUrl(apiKey, vmUuid, 3, 5000);
-  console.log(`[phala] Endpoint URL: ${endpointUrl || 'not yet available — background watch started'}`);
+  // Step 4: Construct deterministic endpoint URL from app_id
+  // Pattern: https://{app_id}-{port}.{dstack_domain}
+  const appId = provision.app_id ?? '';
+  const deterministicUrl = `https://${appId}-${port}.${DSTACK_DOMAIN}`;
+  console.log(`[phala] Deterministic endpoint URL: ${deterministicUrl}`);
+
+  // Quick health check (3 attempts × 5s) — container may still be booting
+  const ready = await waitForAppReady(deterministicUrl, 3, 5000);
+  const endpointUrl = ready ? deterministicUrl : undefined;
+
+  // Also try API-reported URLs as fallback
+  if (!endpointUrl) {
+    const apiUrl = await getAppUrl(apiKey, vmUuid, 2, 3000);
+    if (apiUrl) {
+      console.log(`[phala] API-reported URL: ${apiUrl}`);
+      return {
+        cvmId: vmUuid,
+        status: 'running',
+        dashboardUrl: `${CLOUD_URL}/dashboard/cvms/${vmUuid}`,
+        appId,
+        endpointUrl: apiUrl,
+      };
+    }
+  }
 
   return {
     cvmId: vmUuid,
     status: endpointUrl ? 'running' : 'deploying',
     dashboardUrl: `${CLOUD_URL}/dashboard/cvms/${vmUuid}`,
-    appId: provision.app_id ?? '',
+    appId,
     endpointUrl,
+    deterministicUrl,
   };
 }
 
@@ -94,20 +118,50 @@ export async function watchForEndpoint(
   cvmId: string,
   onFound: (url: string) => Promise<void>,
   maxMinutes = 15,
+  deterministicUrl?: string,
 ): Promise<void> {
-  const attempts = maxMinutes * 4; // every 15s
   console.log(`[phala] Background: watching for endpoint of ${cvmId} (up to ${maxMinutes}min)...`);
-  const url = await getAppUrl(apiKey, cvmId, attempts, 15000);
-  if (url) {
-    console.log(`[phala] Background: found endpoint for ${cvmId}: ${url}`);
-    try {
-      await onFound(url);
-    } catch (e) {
-      console.error(`[phala] Background: onFound callback failed for ${cvmId}:`, e);
+
+  // Strategy: alternate between deterministic URL health check and API poll
+  const totalAttempts = maxMinutes * 4; // every 15s
+  for (let i = 0; i < totalAttempts; i++) {
+    // Try deterministic URL first (faster, no API call)
+    if (deterministicUrl) {
+      try {
+        const res = await fetch(deterministicUrl, {
+          method: 'GET',
+          signal: AbortSignal.timeout(5000),
+        });
+        if (res.ok) {
+          console.log(`[phala] Background: deterministic URL ready: ${deterministicUrl}`);
+          try { await onFound(deterministicUrl); } catch (e) {
+            console.error(`[phala] Background: onFound callback failed:`, e);
+          }
+          return;
+        }
+      } catch {
+        // Not ready yet
+      }
     }
-  } else {
-    console.warn(`[phala] Background: gave up waiting for endpoint of ${cvmId} after ${maxMinutes}min`);
+
+    // Try API-reported URL every 3rd attempt
+    if (i % 3 === 2) {
+      const apiUrl = await getAppUrl(apiKey, cvmId, 1, 0);
+      if (apiUrl) {
+        console.log(`[phala] Background: API-reported URL found: ${apiUrl}`);
+        try { await onFound(apiUrl); } catch (e) {
+          console.error(`[phala] Background: onFound callback failed:`, e);
+        }
+        return;
+      }
+    }
+
+    if (i < totalAttempts - 1) {
+      await new Promise(r => setTimeout(r, 15000));
+    }
   }
+
+  console.warn(`[phala] Background: gave up waiting for endpoint of ${cvmId} after ${maxMinutes}min`);
 }
 
 /**

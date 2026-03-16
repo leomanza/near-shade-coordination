@@ -5,7 +5,7 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://protocol-api-product
 let _coordinatorUrl = process.env.NEXT_PUBLIC_COORDINATOR_URL || "https://coordinator-agent-production-49b6.up.railway.app";
 
 export function setActiveCoordinatorUrl(url: string) { _coordinatorUrl = url; }
-function getCoordinatorUrl(): string { return _coordinatorUrl; }
+export function getCoordinatorUrl(): string { return _coordinatorUrl; }
 
 /** In-memory cache of agent endpoints (fetched from registry contract via protocol API) */
 let _agentEndpointsCache: Record<string, string> = {};
@@ -59,8 +59,11 @@ export async function ensureAgentEndpoints(): Promise<void> {
 }
 
 export interface WorkerStatuses {
-  workers: Record<string, string>;
+  workers: Record<string, string>; // keyed by DID (or legacy worker name)
+  /** DID → display name map (only present with registry source) */
+  workerNames?: Record<string, string>;
   timestamp: string;
+  source?: "registry" | "env_fallback";
 }
 
 export interface CoordinatorStatus {
@@ -119,14 +122,30 @@ export async function getCoordinatorStatus(): Promise<CoordinatorStatus | null> 
 }
 
 export async function getWorkerStatuses(): Promise<WorkerStatuses | null> {
-  return safeFetch<WorkerStatuses>(`${getCoordinatorUrl()}/api/coordinate/workers`);
+  const raw = await safeFetch<any>(`${getCoordinatorUrl()}/api/coordinate/workers`);
+  if (!raw) return null;
+
+  // Registry-based response: workers is an array with DID + ensue_status + display_name
+  if (raw.source === "registry" && Array.isArray(raw.workers)) {
+    const workers: Record<string, string> = {};
+    const workerNames: Record<string, string> = {};
+    for (const w of raw.workers) {
+      workers[w.did] = w.ensue_status || (w.is_active ? "idle" : "offline");
+      if (w.display_name) workerNames[w.did] = w.display_name;
+    }
+    return { workers, workerNames, timestamp: raw.timestamp, source: "registry" };
+  }
+
+  // Env-fallback: coordinator has no registry data — return empty.
+  // The fallback workers (worker1/2/3) are hardcoded placeholders, not real agents.
+  return { workers: {}, timestamp: raw.timestamp, source: "env_fallback" };
 }
 
 export async function getPendingCoordinations(): Promise<PendingCoordinations | null> {
   return safeFetch<PendingCoordinations>(`${getCoordinatorUrl()}/api/coordinate/pending`);
 }
 
-export async function getCoordinatorHealth(): Promise<{ status: string } | null> {
+export async function getCoordinatorHealth(): Promise<{ status: string; contractId?: string; mode?: string } | null> {
   return safeFetch(`${getCoordinatorUrl()}/`);
 }
 
@@ -178,8 +197,9 @@ export interface ProposalDetail {
   workers: Record<string, { result: unknown; timestamp: string }>;
 }
 
-export async function getProposalHistory(): Promise<{ proposals: ProposalSummary[]; total: number } | null> {
-  return safeFetch(`${getCoordinatorUrl()}/api/coordinate/proposals`);
+export async function getProposalHistory(workerDid?: string): Promise<{ proposals: ProposalSummary[]; total: number } | null> {
+  const params = workerDid ? `?workerDid=${encodeURIComponent(workerDid)}` : '';
+  return safeFetch(`${getCoordinatorUrl()}/api/coordinate/proposals${params}`);
 }
 
 export async function getProposalDetail(proposalId: string): Promise<ProposalDetail | null> {
@@ -209,15 +229,36 @@ export async function triggerWorkerTask(
 // ── Worker Registration (protocol API → on-chain) ──
 
 export interface RegisteredWorker {
-  worker_id: string;
+  worker_id: string;   // DID (did:key:z6Mk...) in permissionless mode, legacy name in fallback
   account_id: string | null;
   registered_at: number;
   registered_by: string;
   active: boolean;
 }
 
+/**
+ * Get registered workers — queries coordinator's /api/coordinate/workers (registry-backed).
+ * Falls back to env-based discovery if registry is unavailable.
+ */
 export async function getRegisteredWorkers(): Promise<{ workers: RegisteredWorker[]; activeCount: number } | null> {
-  return safeFetch(`${API_URL}/api/workers/registered`);
+  const raw = await safeFetch<any>(`${getCoordinatorUrl()}/api/coordinate/workers`);
+  if (!raw) return null;
+
+  // Registry-based response
+  if (raw.source === "registry" && Array.isArray(raw.workers)) {
+    const workers: RegisteredWorker[] = raw.workers.map((w: any) => ({
+      worker_id: w.did,
+      account_id: null,
+      registered_at: w.registered_at ?? 0,
+      registered_by: "",
+      active: w.is_active,
+    }));
+    return { workers, activeCount: workers.filter((w) => w.active).length };
+  }
+
+  // Env-fallback: coordinator has no registry data — return empty.
+  // The fallback workers (worker1/2/3) are hardcoded placeholders, not real agents.
+  return { workers: [], activeCount: 0 };
 }
 
 export async function registerWorker(
@@ -266,8 +307,15 @@ const NEAR_NETWORK = process.env.NEXT_PUBLIC_NEAR_NETWORK || "testnet";
 const NEAR_RPC = NEAR_NETWORK === "mainnet"
   ? "https://rpc.fastnear.com"
   : "https://test.rpc.fastnear.com";
-const CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
+
+const DEFAULT_CONTRACT_ID = process.env.NEXT_PUBLIC_contractId
   || (NEAR_NETWORK === "mainnet" ? "coordinator.agents-coordinator.near" : "coordinator.agents-coordinator.testnet");
+
+// Active coordinator contract — updated when a coordinator is selected in the dashboard
+let _contractId = DEFAULT_CONTRACT_ID;
+export function setActiveContractId(id: string) { _contractId = id; }
+export function getActiveContractId(): string { return _contractId; }
+export { DEFAULT_CONTRACT_ID };
 
 async function nearViewCall<T>(method: string, args: Record<string, unknown> = {}): Promise<T | null> {
   try {
@@ -281,7 +329,7 @@ async function nearViewCall<T>(method: string, args: Record<string, unknown> = {
         params: {
           request_type: "call_function",
           finality: "final",
-          account_id: CONTRACT_ID,
+          account_id: _contractId,
           method_name: method,
           args_base64: btoa(JSON.stringify(args)),
         },
@@ -386,29 +434,39 @@ async function registryViewCall<T>(method: string, args: Record<string, unknown>
 }
 
 export interface RegistryCoordinator {
-  coordinator_id: string;
-  owner: string;
-  contract_id: string | null;
-  phala_cvm_id: string | null;
-  ensue_configured: boolean;
-  endpoint_url: string | null;
-  created_at: number;
-  active: boolean;
+  account_id: string;
+  coordinator_did: string;
+  endpoint_url: string;
+  cvm_id: string;
+  min_workers: number;
+  max_workers: number;
+  registered_at: number;
+  is_active: boolean;
 }
 
 export interface RegistryWorker {
-  worker_id: string;
-  owner: string;
-  coordinator_id: string | null;
-  phala_cvm_id: string | null;
-  nova_group_id: string | null;
-  endpoint_url: string | null;
-  created_at: number;
-  active: boolean;
+  account_id: string;
+  coordinator_did: string;
+  worker_did: string;
+  endpoint_url: string;
+  cvm_id: string;
+  registered_at: number;
+  is_active: boolean;
 }
 
 export async function getActiveCoordinators(): Promise<RegistryCoordinator[] | null> {
   return registryViewCall<RegistryCoordinator[]>("list_active_coordinators");
+}
+
+export async function getActiveWorkers(): Promise<RegistryWorker[] | null> {
+  return registryViewCall<RegistryWorker[]>("list_active_workers");
+}
+
+/** Get workers registered by a specific NEAR account */
+export async function getWorkersForAccount(accountId: string): Promise<RegistryWorker[]> {
+  const all = await getActiveWorkers();
+  if (!all) return [];
+  return all.filter(w => w.account_id === accountId);
 }
 
 export async function getRegistryStats(): Promise<{
@@ -435,9 +493,9 @@ export interface DeployRequest {
   sponsorPrivateKey?: string;
   nearNetwork?: string;
   // Worker fields
-  novaApiKey?: string;
-  novaAccountId?: string;
-  novaGroupId?: string;
+  storachaAgentPrivateKey?: string;
+  storachaDelegationProof?: string;
+  storachaSpaceDid?: string;
   coordinatorId?: string;
 }
 
@@ -472,7 +530,63 @@ export async function pollDeployEndpoint(cvmId: string, phalaApiKey: string): Pr
   return url ?? null;
 }
 
-// ── Nova / Agent Identity API (direct to worker) ──
+// ── Worker Display Names ──
+
+export async function setWorkerDisplayName(did: string, name: string): Promise<{ status: string } | null> {
+  return safeFetch<{ status: string }>(
+    `${getCoordinatorUrl()}/api/coordinate/workers/${encodeURIComponent(did)}/name`,
+    {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    },
+  );
+}
+
+// ── Provisioning API (one-click worker deploy) ──
+
+export interface ProvisionRequest {
+  coordinatorDid: string;
+  displayName: string;
+  nearAccount: string;
+}
+
+export interface ProvisionJobStatus {
+  jobId: string;
+  status: string;
+  step: string;
+  workerDid?: string;
+  storachaPrivateKey?: string;
+  phalaEndpoint?: string;
+  cvmId?: string;
+  dashboardUrl?: string;
+  coordinatorDid?: string;
+  displayName?: string;
+  nearAccount?: string;
+  error?: string;
+}
+
+export async function startProvisionJob(params: ProvisionRequest): Promise<{ jobId: string } | null> {
+  return safeFetch<{ jobId: string }>(`${API_URL}/api/provision/worker`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  }, 15000);
+}
+
+export async function getProvisionStatus(jobId: string): Promise<ProvisionJobStatus | null> {
+  return safeFetch<ProvisionJobStatus>(`${API_URL}/api/provision/status/${jobId}`, undefined, 10000);
+}
+
+export async function completeProvisionRegistration(jobId: string, txHash?: string): Promise<{ status: string } | null> {
+  return safeFetch<{ status: string }>(`${API_URL}/api/provision/register`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jobId, txHash }),
+  }, 10000);
+}
+
+// ── Storacha / Agent Identity API (direct to worker) ──
 
 export interface AgentManifesto {
   agentId: string;

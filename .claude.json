@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "storacha-storage": {
+      "command": "node",
+      "args": ["./mcp-storage-server/dist/index.js"],
+      "env": {
+        "PRIVATE_KEY": "${STORACHA_AGENT_PRIVATE_KEY}",
+        "DELEGATION": "${STORACHA_DELEGATION_PROOF}"
+      }
+    }
+  },
+  "plugins": {
+    "ensue-backup": {
+      "backup-interval": 50,
+      "trigger": "after-deliberation-cycle",
+      "description": "Serialize Ensue coordination tree to Storacha every 50 agent turns and after each deliberation cycle"
+    }
+  }
+}

@@ -8,6 +8,7 @@ import {
   getCoordinatorStatus,
   getWorkerStatuses,
   getCoordinatorHealth,
+  getActiveContractId,
   type OnChainState,
   type OnChainProposal,
   type ProposalState,
@@ -16,9 +17,10 @@ import {
 } from "@/lib/api";
 import Link from "next/link";
 
-const CONTRACT_ID =
-  process.env.NEXT_PUBLIC_contractId || "coordinator.agents-coordinator.testnet";
-const EXPLORER_URL = `https://testnet.nearblocks.io/address/${CONTRACT_ID}`;
+const NEAR_NETWORK = process.env.NEXT_PUBLIC_NEAR_NETWORK || "testnet";
+const EXPLORER_BASE = NEAR_NETWORK === "mainnet"
+  ? "https://nearblocks.io/address/"
+  : "https://testnet.nearblocks.io/address/";
 
 const STATE_COLORS: Record<ProposalState, string> = {
   Created: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
@@ -48,7 +50,15 @@ export default function PublicDashboard() {
 
   const coordinatorOnline = !healthError && !coordError;
   const proposals = chainState?.proposals ?? [];
-  const workers = chainState?.registeredWorkers?.filter((w) => w.active) ?? [];
+
+  // Prefer registry-based workers (V2 permissionless) over coordinator contract workers (V1 legacy)
+  const apiWorkers = workerStatuses?.workers
+    ? Object.keys(workerStatuses.workers).map(id => ({ worker_id: id, active: true, account_id: null as string | null, registered_at: 0, registered_by: '' }))
+    : [];
+  const onChainWorkers = chainState?.registeredWorkers?.filter((w) => w.active) ?? [];
+
+  // Registry workers (from coordinator API) are the primary source in V2
+  const workers = apiWorkers.length > 0 ? apiWorkers : onChainWorkers;
 
   return (
     <div className="min-h-screen bg-[#050505] p-6 md:p-10 max-w-6xl mx-auto">
@@ -94,10 +104,12 @@ export default function PublicDashboard() {
           </div>
           {workers.map((w) => {
             const status = workerStatuses?.workers[w.worker_id] || "unknown";
+            const displayName = workerStatuses?.workerNames?.[w.worker_id];
+            const label = displayName || (w.worker_id.startsWith("did:") ? w.worker_id.substring(0, 16) + "..." : w.worker_id);
             return (
               <div key={w.worker_id} className="flex items-center gap-2 text-xs text-zinc-400 font-mono">
                 <StatusDot status={workerError ? "offline" : status} />
-                <span>{w.worker_id}</span>
+                <span>{label}</span>
               </div>
             );
           })}
@@ -106,7 +118,7 @@ export default function PublicDashboard() {
           )}
           <div className="ml-auto flex items-center gap-2">
             <a
-              href={EXPLORER_URL}
+              href={`${EXPLORER_BASE}${getActiveContractId()}`}
               target="_blank"
               rel="noopener noreferrer"
               className="text-[10px] font-mono px-2 py-1 rounded-md bg-zinc-800 text-blue-400 hover:text-blue-300 hover:bg-zinc-700 transition-colors"
@@ -122,8 +134,8 @@ export default function PublicDashboard() {
           <div className="rounded-xl border border-zinc-800 bg-zinc-900/50 p-5">
             <h3 className="text-sm font-semibold text-zinc-100 mb-3">Contract</h3>
             <div className="space-y-2 text-xs">
-              <div className="font-mono text-zinc-500 truncate" title={CONTRACT_ID}>
-                {CONTRACT_ID}
+              <div className="font-mono text-zinc-500 truncate" title={getActiveContractId()}>
+                {getActiveContractId()}
               </div>
               {chainState && (
                 <>
@@ -199,11 +211,20 @@ export default function PublicDashboard() {
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
               {workers.map((w) => {
                 const status = workerStatuses?.workers[w.worker_id] || "unknown";
+                const displayName = workerStatuses?.workerNames?.[w.worker_id];
+                const truncatedDid = w.worker_id.startsWith("did:") ? w.worker_id.substring(0, 24) + "..." : null;
                 return (
                   <div key={w.worker_id} className="flex items-center gap-3 p-3 rounded-lg bg-zinc-800/40">
                     <StatusDot status={workerError ? "offline" : status} />
                     <div>
-                      <p className="text-xs font-mono text-zinc-300 font-semibold">{w.worker_id}</p>
+                      <p className="text-xs font-mono text-zinc-300 font-semibold">
+                        {displayName || w.worker_id}
+                      </p>
+                      {truncatedDid && (
+                        <p className="text-[10px] font-mono text-zinc-600 truncate max-w-[200px]">
+                          {truncatedDid}
+                        </p>
+                      )}
                       {w.account_id && (
                         <p className="text-[10px] font-mono text-zinc-600 truncate max-w-[200px]">
                           {w.account_id}
@@ -230,7 +251,7 @@ export default function PublicDashboard() {
 
         {/* Footer */}
         <footer className="mt-8 text-center text-[10px] text-zinc-700 font-mono">
-          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Nova SDK
+          NEAR Protocol &middot; NEAR AI &middot; Shade Agents &middot; Ensue Network &middot; Storacha
         </footer>
       </div>
     </div>

@@ -7,6 +7,7 @@ import { serve } from '@hono/node-server';
 import { cors } from 'hono/cors';
 import { startCoordinationLoop, startLocalCoordinationLoop } from './monitor/memory-monitor';
 import coordinateRoute from './routes/coordinate';
+import { getAgentDid } from './storacha/identity';
 
 const LOCAL_MODE = process.env.LOCAL_MODE === 'true';
 
@@ -117,8 +118,45 @@ async function initShadeAgent(): Promise<void> {
     }
   }, SIX_DAYS_MS);
 
+  // Register coordinator in registry before starting the loop
+  await ensureCoordinatorRegistered();
+
   console.log('\nStarting coordination loop...');
   startCoordinationLoop();
+}
+
+/**
+ * Ensure the coordinator is registered in the NEAR registry contract.
+ * Idempotent: if already registered, does nothing.
+ * Non-fatal: logs warnings on failure but never crashes.
+ */
+async function ensureCoordinatorRegistered(): Promise<void> {
+  try {
+    // localRegisterCoordinator imported dynamically to avoid circular deps at startup
+    const { localRegisterCoordinator } = await import('./contract/local-contract');
+
+    let coordinatorDid: string;
+    try {
+      coordinatorDid = await getAgentDid();
+    } catch {
+      console.warn('[REGISTRY] STORACHA_AGENT_PRIVATE_KEY not set, using fallback coordinator ID');
+      coordinatorDid = 'local-coordinator';
+    }
+
+    const endpointUrl = process.env.COORDINATOR_ENDPOINT_URL || `http://localhost:${process.env.PORT || '3000'}`;
+    const minWorkers = parseInt(process.env.MIN_WORKERS ?? '1');
+    const maxWorkers = parseInt(process.env.MAX_WORKERS ?? '10');
+    const cvmId = process.env.PHALA_CVM_ID ?? 'local';
+
+    const registered = await localRegisterCoordinator(coordinatorDid, endpointUrl, minWorkers, maxWorkers, cvmId);
+    if (registered) {
+      console.log(`[REGISTRY] Coordinator registered/confirmed: ${coordinatorDid}`);
+    } else {
+      console.warn('[REGISTRY] Coordinator registration failed (non-fatal)');
+    }
+  } catch (err) {
+    console.warn('[REGISTRY] ensureCoordinatorRegistered failed (non-fatal):', err);
+  }
 }
 
 // Start server
@@ -136,6 +174,11 @@ serve({ fetch: app.fetch, port }, async (info) => {
     console.log('[LOCAL MODE] Starting local coordination loop (Ensue-only)...');
     console.log('[LOCAL MODE] Use POST /api/coordinate/trigger to start a coordination\n');
     startLocalCoordinationLoop();
+
+    // Register coordinator in registry (non-blocking)
+    ensureCoordinatorRegistered().catch(err =>
+      console.warn('[LOCAL MODE] Coordinator registry registration failed (non-fatal):', err)
+    );
   } else if (SHADE_AGENT_CONFIGURED) {
     // Initialize ShadeClient (v2 pattern from shade-agent-template 2.0)
     // Run in background so the HTTP server stays responsive during init

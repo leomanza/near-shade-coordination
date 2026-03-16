@@ -1,0 +1,88 @@
+{
+  "_format": "hh-sol-artifact-1",
+  "contractName": "FHE",
+  "sourceName": "@fhevm/solidity/lib/FHE.sol",
+  "abi": [
+    {
+      "inputs": [],
+      "name": "DeserializingDecryptionProofFail",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "EmptyDecryptionProof",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "InvalidKMSSignatures",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "address",
+          "name": "invalidSigner",
+          "type": "address"
+        }
+      ],
+      "name": "KMSInvalidSigner",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "uint256",
+          "name": "numSignatures",
+          "type": "uint256"
+        }
+      ],
+      "name": "KMSSignatureThresholdNotReached",
+      "type": "error"
+    },
+    {
+      "inputs": [],
+      "name": "KMSZeroSignature",
+      "type": "error"
+    },
+    {
+      "inputs": [
+        {
+          "internalType": "bytes32",
+          "name": "handle",
+          "type": "bytes32"
+        },
+        {
+          "internalType": "address",
+          "name": "sender",
+          "type": "address"
+        }
+      ],
+      "name": "SenderNotAllowedToUseHandle",
+      "type": "error"
+    },
+    {
+      "anonymous": false,
+      "inputs": [
+        {
+          "indexed": false,
+          "internalType": "bytes32[]",
+          "name": "handlesList",
+          "type": "bytes32[]"
+        },
+        {
+          "indexed": false,
+          "internalType": "bytes",
+          "name": "abiEncodedCleartexts",
+          "type": "bytes"
+        }
+      ],
+      "name": "PublicDecryptionVerified",
+      "type": "event"
+    }
+  ],
+  "bytecode": "0x602c6032600b8282823980515f1a607314602657634e487b7160e01b5f525f60045260245ffd5b305f52607381538281f3fe730000000000000000000000000000000000000000301460806040525f5ffdfea164736f6c634300081b000a",
+  "deployedBytecode": "0x730000000000000000000000000000000000000000301460806040525f5ffdfea164736f6c634300081b000a",
+  "linkReferences": {},
+  "deployedLinkReferences": {}
+}

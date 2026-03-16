@@ -1,11 +1,10 @@
 import { Hono } from 'hono';
 import {
   loadIdentity,
-  updateManifesto,
-  updatePreferences,
   formatIdentityContext,
-} from '../nova/agent-identity';
-import { diagnoseNova, isNovaAvailable, novaHealthInfo } from '../nova/nova-client';
+} from '../storacha/agent-identity';
+import { isStorachaConfigured, getAgentDid } from '../storacha/identity';
+import { getProfileClient } from '../storacha/profile-client';
 
 const app = new Hono();
 
@@ -16,11 +15,17 @@ const app = new Hono();
 app.get('/identity', async (c) => {
   try {
     const identity = await loadIdentity();
+    const did = isStorachaConfigured() ? await getAgentDid() : null;
     return c.json({
       manifesto: identity.manifesto,
       preferences: identity.preferences,
       recentDecisions: identity.recentDecisions,
       formatted: formatIdentityContext(identity),
+      storacha: {
+        configured: isStorachaConfigured(),
+        agentDid: did,
+        spaceDid: process.env.STORACHA_SPACE_DID || null,
+      },
     });
   } catch (error) {
     return c.json(
@@ -31,50 +36,39 @@ app.get('/identity', async (c) => {
 });
 
 /**
- * POST /api/knowledge/manifesto
- * Update the agent's manifesto. This is how a human or group shapes
- * what the agent cares about.
- *
- * Body: { name?, role?, values?: string[], guidelines?: string }
- */
-app.post('/manifesto', async (c) => {
-  try {
-    const body = await c.req.json();
-    const updated = await updateManifesto(body);
-    return c.json({ message: 'Manifesto updated', manifesto: updated });
-  } catch (error) {
-    return c.json(
-      { error: 'Failed to update manifesto', details: error instanceof Error ? error.message : 'Unknown' },
-      500,
-    );
-  }
-});
-
-/**
  * POST /api/knowledge/feed
- * Feed knowledge to the agent. Adds notes to the agent's accumulated
- * knowledge and optionally adjusts voting weights.
- *
- * Body: {
- *   notes?: string[],       — knowledge notes to add
- *   votingWeights?: Record<string, number>  — adjust voting weight factors
- * }
+ * Feed knowledge notes to the agent. Persists to Storacha.
  */
 app.post('/feed', async (c) => {
   try {
-    const body = await c.req.json();
-    const { notes, votingWeights } = body;
+    const body = await c.req.json<{ notes?: string[]; votingWeights?: Record<string, number> }>();
+    const client = await getProfileClient();
 
-    if (!notes && !votingWeights) {
-      return c.json({ error: 'Provide at least "notes" or "votingWeights"' }, 400);
+    // Append knowledge notes
+    if (body.notes && body.notes.length > 0) {
+      for (const note of body.notes) {
+        await client.appendKnowledgeNote(note);
+      }
     }
 
-    const updated = await updatePreferences({
-      addNotes: notes,
-      votingWeights,
-    });
+    // Update voting weights if provided
+    if (body.votingWeights) {
+      const prefs = await client.getPreferences();
+      const updated = {
+        ...prefs,
+        votingWeights: { ...prefs.votingWeights, ...body.votingWeights },
+        updatedAt: new Date().toISOString(),
+      };
+      await client.savePreferences(updated);
+    }
 
-    return c.json({ message: 'Knowledge fed to agent', preferences: updated });
+    const preferences = await client.getPreferences();
+    const knowledge = await client.getKnowledgeNotes();
+
+    return c.json({
+      message: `Knowledge fed: ${body.notes?.length || 0} notes`,
+      preferences: { ...preferences, knowledgeNotes: knowledge },
+    });
   } catch (error) {
     return c.json(
       { error: 'Failed to feed knowledge', details: error instanceof Error ? error.message : 'Unknown' },
@@ -84,36 +78,52 @@ app.post('/feed', async (c) => {
 });
 
 /**
- * GET /api/knowledge/diagnose
- * Diagnose Nova SDK setup and connectivity.
+ * POST /api/knowledge/manifesto
+ * Update the agent's manifesto. Persists to Storacha.
  */
-app.get('/diagnose', async (c) => {
+app.post('/manifesto', async (c) => {
   try {
-    const diagnostics = await diagnoseNova();
+    const updates = await c.req.json<{ name?: string; role?: string; guidelines?: string; values?: string[] }>();
+    const client = await getProfileClient();
+    const current = await client.getManifesto();
+
+    const updated = {
+      ...current,
+      ...(updates.name !== undefined && { name: updates.name }),
+      ...(updates.role !== undefined && { role: updates.role }),
+      ...(updates.guidelines !== undefined && { guidelines: updates.guidelines }),
+      ...(updates.values !== undefined && { values: updates.values }),
+    };
+
+    await client.saveManifesto(updated);
+
     return c.json({
-      novaAvailable: isNovaAvailable(),
-      ...diagnostics,
+      message: 'Manifesto updated',
+      manifesto: updated,
     });
   } catch (error) {
     return c.json(
-      { error: 'Diagnosis failed', details: error instanceof Error ? error.message : 'Unknown' },
+      { error: 'Failed to update manifesto', details: error instanceof Error ? error.message : 'Unknown' },
       500,
     );
   }
 });
 
 /**
- * GET /api/knowledge/nova-health
- * Comprehensive Nova health check: balance, group info, transactions,
- * fees, shade key and prepare_upload probe.
+ * GET /api/knowledge/health
+ * Agent identity health check.
  */
-app.get('/nova-health', async (c) => {
+app.get('/health', async (c) => {
   try {
-    const health = await novaHealthInfo();
-    return c.json(health);
+    const did = isStorachaConfigured() ? await getAgentDid() : null;
+    return c.json({
+      storachaConfigured: isStorachaConfigured(),
+      agentDid: did,
+      spaceDid: process.env.STORACHA_SPACE_DID || null,
+    });
   } catch (error) {
     return c.json(
-      { error: 'Nova health check failed', details: error instanceof Error ? error.message : 'Unknown' },
+      { error: 'Health check failed', details: error instanceof Error ? error.message : 'Unknown' },
       500,
     );
   }

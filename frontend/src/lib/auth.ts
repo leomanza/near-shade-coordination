@@ -11,7 +11,7 @@ import {
 } from "react";
 import { createElement } from "react";
 import { NearConnector } from "@hot-labs/near-connect";
-import { getOnChainState, type RegisteredWorker } from "./api";
+import { getOnChainState, getWorkersForAccount, type RegisteredWorker } from "./api";
 
 export type Role = "coordinator" | "worker" | "none";
 
@@ -30,6 +30,19 @@ export interface AuthState {
   forceConnect: (accountId: string) => Promise<void>;
   /** Disconnect wallet */
   disconnect: () => Promise<void>;
+  /** Sign and send a transaction using the connected wallet */
+  signAndSendTransaction: (params: {
+    receiverId: string;
+    actions: Array<{
+      type: string;
+      params: {
+        methodName: string;
+        args: Record<string, unknown>;
+        gas: string;
+        deposit: string;
+      };
+    }>;
+  }) => Promise<unknown>;
 }
 
 const NEAR_NETWORK = (process.env.NEXT_PUBLIC_NEAR_NETWORK || "testnet") as "mainnet" | "testnet";
@@ -42,6 +55,7 @@ const AuthContext = createContext<AuthState>({
   connect: async () => {},
   forceConnect: async () => {},
   disconnect: async () => {},
+  signAndSendTransaction: async () => { throw new Error("Not connected"); },
 });
 
 export function useAuth(): AuthState {
@@ -55,19 +69,26 @@ async function detectRole(
   accountId: string
 ): Promise<{ role: Role; workerId: string | null }> {
   const state = await getOnChainState();
-  if (!state) return { role: "none", workerId: null };
 
-  // Check if coordinator (owner)
-  if (accountId === state.owner) {
+  // Check if coordinator (owner of coordinator contract)
+  if (state && accountId === state.owner) {
     return { role: "coordinator", workerId: null };
   }
 
-  // Check if registered worker
-  const match = state.registeredWorkers.find(
-    (w: RegisteredWorker) => w.account_id === accountId && w.active
-  );
-  if (match) {
-    return { role: "worker", workerId: match.worker_id };
+  // Check coordinator contract workers (V1 legacy)
+  if (state) {
+    const match = state.registeredWorkers.find(
+      (w: RegisteredWorker) => w.account_id === accountId && w.active
+    );
+    if (match) {
+      return { role: "worker", workerId: match.worker_id };
+    }
+  }
+
+  // Check registry contract workers (V2 permissionless)
+  const registryWorkers = await getWorkersForAccount(accountId);
+  if (registryWorkers.length > 0) {
+    return { role: "worker", workerId: registryWorkers[0].worker_did };
   }
 
   return { role: "none", workerId: null };
@@ -187,10 +208,28 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem("forcedAccountId");
   }, []);
 
+  const signAndSendTransaction = useCallback(async (params: {
+    receiverId: string;
+    actions: Array<{
+      type: string;
+      params: {
+        methodName: string;
+        args: Record<string, unknown>;
+        gas: string;
+        deposit: string;
+      };
+    }>;
+  }) => {
+    const connector = connectorRef.current;
+    if (!connector) throw new Error("Wallet not initialized");
+    const wallet = await connector.connect();
+    return wallet.signAndSendTransaction(params);
+  }, []);
+
   return createElement(
     AuthContext.Provider,
     {
-      value: { accountId, role, workerId, connecting, connect, forceConnect, disconnect },
+      value: { accountId, role, workerId, connecting, connect, forceConnect, disconnect, signAndSendTransaction },
     },
     children
   );

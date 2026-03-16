@@ -5,14 +5,16 @@ import { usePolling } from "@/lib/use-polling";
 import {
   getOnChainState,
   triggerVote,
+  getActiveContractId,
   type OnChainState,
   type ProposalState,
   type OnChainProposal,
 } from "@/lib/api";
 
-const CONTRACT_ID =
-  process.env.NEXT_PUBLIC_contractId || "coordinator.agents-coordinator.testnet";
-const EXPLORER_URL = `https://testnet.nearblocks.io/address/${CONTRACT_ID}`;
+const NEAR_NETWORK = process.env.NEXT_PUBLIC_NEAR_NETWORK || "testnet";
+const EXPLORER_BASE = NEAR_NETWORK === "mainnet"
+  ? "https://nearblocks.io/address/"
+  : "https://testnet.nearblocks.io/address/";
 
 const STATE_COLORS: Record<ProposalState, string> = {
   Created: "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
@@ -29,13 +31,68 @@ const ALL_STATES: Array<ProposalState | "All"> = [
   "TimedOut",
 ];
 
-export default function ContractStatePanel() {
+interface ContractStatePanelProps {
+  /** Connected account ID — enables owner actions when it matches contract owner */
+  accountId?: string | null;
+  /** Sign and send a transaction via the connected wallet */
+  signAndSendTransaction?: (params: {
+    receiverId: string;
+    actions: Array<{
+      type: string;
+      params: {
+        methodName: string;
+        args: Record<string, unknown>;
+        gas: string;
+        deposit: string;
+      };
+    }>;
+  }) => Promise<unknown>;
+}
+
+export default function ContractStatePanel({ accountId, signAndSendTransaction }: ContractStatePanelProps = {}) {
   const fetcher = useCallback(getOnChainState, []);
-  const { data: state, error } = usePolling<OnChainState>(fetcher, 5000);
+  const { data: state, error, refresh } = usePolling<OnChainState>(fetcher, 5000);
   const [filter, setFilter] = useState<ProposalState | "All">("All");
   const [expandedId, setExpandedId] = useState<number | null>(null);
   const [proposalText, setProposalText] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [manifestoText, setManifestoText] = useState("");
+  const [editingManifesto, setEditingManifesto] = useState(false);
+  const [savingManifesto, setSavingManifesto] = useState(false);
+  const [manifestoError, setManifestoError] = useState<string | null>(null);
+  const [manifestoExpanded, setManifestoExpanded] = useState(false);
+
+  const isOwner = !!(accountId && state && accountId === state.owner);
+
+  async function handleSetManifesto() {
+    if (!manifestoText.trim() || savingManifesto || !signAndSendTransaction) return;
+    setSavingManifesto(true);
+    setManifestoError(null);
+    try {
+      await signAndSendTransaction({
+        receiverId: getActiveContractId(),
+        actions: [
+          {
+            type: "FunctionCall",
+            params: {
+              methodName: "set_manifesto",
+              args: { manifesto_text: manifestoText.trim() },
+              gas: "30000000000000",
+              deposit: "0",
+            },
+          },
+        ],
+      });
+      setEditingManifesto(false);
+      setManifestoText("");
+      // Refresh on-chain state to pick up the new manifesto
+      setTimeout(() => refresh(), 2000);
+    } catch (err) {
+      setManifestoError(err instanceof Error ? err.message : "Transaction failed");
+    } finally {
+      setSavingManifesto(false);
+    }
+  }
 
   const proposals = state?.proposals ?? [];
   const filtered =
@@ -66,7 +123,7 @@ export default function ContractStatePanel() {
           Delibera
         </h3>
         <a
-          href={EXPLORER_URL}
+          href={`${EXPLORER_BASE}${getActiveContractId()}`}
           target="_blank"
           rel="noopener noreferrer"
           className="text-[10px] font-mono px-2 py-1 rounded-md bg-zinc-800 text-blue-400 hover:text-blue-300 hover:bg-zinc-700 transition-colors"
@@ -80,16 +137,78 @@ export default function ContractStatePanel() {
       ) : (
         <div className="space-y-3">
           {/* Manifesto */}
-          {state.manifesto && (
+          {state.manifesto && !editingManifesto && (
             <div className="p-2.5 rounded-lg bg-zinc-800/40 border border-zinc-700/50">
-              <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider mb-1">
-                Manifesto
-              </p>
-              <p className="text-[10px] text-zinc-400 leading-relaxed line-clamp-3">
+              <div className="flex items-center justify-between mb-1">
+                <p className="text-[9px] font-bold text-zinc-500 uppercase tracking-wider">
+                  Manifesto
+                </p>
+                {isOwner && (
+                  <button
+                    onClick={() => { setManifestoText(state.manifesto?.text || ""); setEditingManifesto(true); }}
+                    className="text-[9px] px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-300 hover:border-zinc-600 transition-colors font-mono"
+                  >
+                    edit
+                  </button>
+                )}
+              </div>
+              <p className={`text-[10px] text-zinc-400 leading-relaxed whitespace-pre-wrap ${!manifestoExpanded ? "line-clamp-5" : ""}`}>
                 {state.manifesto.text}
               </p>
+              {state.manifesto.text.length > 200 && (
+                <button
+                  onClick={() => setManifestoExpanded(!manifestoExpanded)}
+                  className="text-[9px] text-zinc-500 hover:text-zinc-300 font-mono mt-1 transition-colors"
+                >
+                  {manifestoExpanded ? "show less" : "show more"}
+                </button>
+              )}
               <p className="text-[9px] font-mono text-zinc-600 mt-1">
                 hash: {state.manifesto.hash.slice(0, 16)}...
+              </p>
+            </div>
+          )}
+
+          {/* Manifesto Editor — shown when no manifesto exists (owner) or editing */}
+          {isOwner && (!state.manifesto || editingManifesto) && (
+            <div className="p-2.5 rounded-lg bg-zinc-800/40 border border-[#00ff41]/20">
+              <p className="text-[9px] font-bold text-[#00ff41]/70 uppercase tracking-wider mb-1.5">
+                {state.manifesto ? "Update Manifesto" : "Set DAO Manifesto"}
+              </p>
+              {!state.manifesto && (
+                <p className="text-[10px] text-zinc-500 mb-2">
+                  Define the manifesto that guides your AI agents&apos; deliberation. Required before voting can begin.
+                </p>
+              )}
+              <textarea
+                value={manifestoText}
+                onChange={(e) => setManifestoText(e.target.value)}
+                placeholder="Enter the DAO manifesto — the principles and values that guide agent voting decisions..."
+                className="w-full text-xs bg-zinc-900/80 border border-zinc-700/50 rounded-lg p-2 text-zinc-300 placeholder-zinc-600 focus:outline-none focus:border-[#00ff41]/30 resize-none"
+                rows={4}
+              />
+              <div className="flex items-center gap-2 mt-1.5">
+                <button
+                  onClick={handleSetManifesto}
+                  disabled={!manifestoText.trim() || savingManifesto}
+                  className="text-[10px] px-3 py-1.5 rounded-md bg-[#00ff41]/10 border border-[#00ff41]/30 text-[#00ff41] font-semibold hover:bg-[#00ff41]/15 disabled:opacity-40 disabled:cursor-not-allowed transition-colors font-mono"
+                >
+                  {savingManifesto ? "signing..." : state.manifesto ? "update manifesto" : "set manifesto"}
+                </button>
+                {editingManifesto && (
+                  <button
+                    onClick={() => { setEditingManifesto(false); setManifestoText(""); setManifestoError(null); }}
+                    className="text-[10px] px-3 py-1.5 rounded-md bg-zinc-800 border border-zinc-700 text-zinc-400 hover:text-zinc-300 transition-colors font-mono"
+                  >
+                    cancel
+                  </button>
+                )}
+              </div>
+              {manifestoError && (
+                <p className="text-[10px] text-red-400 mt-1">{manifestoError}</p>
+              )}
+              <p className="text-[9px] text-zinc-600 mt-1.5">
+                Stored on-chain via <span className="font-mono">{getActiveContractId()}</span>
               </p>
             </div>
           )}

@@ -38,6 +38,8 @@ export interface TallyResult {
   workers: WorkerResult[];
   timestamp: string;
   proposalId?: number;
+  /** DID → display name map for all participating workers */
+  workerNames?: Record<string, string>;
 }
 
 /**
