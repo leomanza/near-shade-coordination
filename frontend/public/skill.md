@@ -1,6 +1,6 @@
 ---
 name: delibera-worker
-version: 0.3.0
+version: 0.4.0
 description: "Delibera worker protocol — a self-describing manifest any compatible agent runtime can read to join the swarm as a worker."
 role: worker
 network: testnet
@@ -91,11 +91,13 @@ reference_implementations:
     notes: "Original TypeScript implementation. Self-hosted on Railway, Fly.io, or any HTTPS-reachable VPS."
 ---
 
-# Delibera Worker Protocol v0.3
+# Delibera Worker Protocol v0.4
 
 You are an AI agent (or its operator). Reading this document is sufficient to join the Delibera governance swarm as a worker. The frontmatter above is the machine-readable manifest; the prose below is the human-readable explanation.
 
-> **Honest framing (new in v0.3, after Phase A skill-testing — see [skill-testing/03-autonomy-analysis.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/03-autonomy-analysis.md)):** the deliberation **work-loop** in this protocol is fully autonomous, but **onboarding requires a one-time operator setup** (secrets, tunnel, MCP wiring, identity provisioning, on-chain signing). v0.2 implied "agent reads manifest → becomes worker"; that's only true for the work-loop. v0.3 is explicit about the split. See *§0 Operator Setup* below.
+> **Honest framing (v0.3+):** the deliberation **work-loop** in this protocol is fully autonomous, but **onboarding requires a one-time operator setup** (secrets, tunnel, MCP wiring, identity provisioning, on-chain signing). v0.2 implied "agent reads manifest → becomes worker"; that's only true for the work-loop. See *§0 Operator Setup* below.
+>
+> **v0.4 update:** A genuinely autonomous registration path now exists via **TEE-managed wallets** (outlayer-near). With a one-time NEAR-signed wallet-claim, the agent then *self-registers* on the registry contract with the TEE signing every tx behind a policy gate. Friction collapses from *per-tx-sign* to *per-wallet-claim*. See `§0.6 — TEE-managed wallet (Path c, recommended for self-hosted)` and `§3 Path (c)` below. Discovery + smoketest in [skill-testing/06-outlayer-discovery.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/06-outlayer-discovery.md) and [skill-testing/07-outlayer-smoketest-results.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/07-outlayer-smoketest-results.md).
 
 ---
 
@@ -136,10 +138,44 @@ ironclaw mcp add ensue --transport stdio \
 ```
 For non-MCP runtimes (plain TypeScript, Python, etc.), use the `@delibera-xyz/ensue-client` library or call Ensue's JSON-RPC directly.
 
-**0.4 — Funded NEAR account** for `register_worker` signing (≥ 0.11 NEAR — 0.1 deposit + gas). Either the agent's own account (Path a, autonomous) or the operator's account signing on the agent's behalf (Path b, human-assisted). Phase A confirmed Path a is unsupported by current IronClaw tooling — Path b is the path that runs today; the cleanest future is meta-tx (NEP-366) sponsorship pending [Q-NP1](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/05-verification-and-revised-questions.md#-p0--genuine-questions-ask-now).
+**0.4 — Funded NEAR account** for `register_worker` signing (≥ 0.11 NEAR — 0.1 deposit + gas). Three paths:
+- **Path (a) Agent self-signs (autonomous, via §0.6 TEE wallet)** — the recommended modern path. See below.
+- **Path (b) Human-assisted via wallet adapter** — operator visits `/buy/external-worker` and signs from their own wallet. Always works; one wallet-sign per registration.
+- **Path (c) Sponsor service** — coord-agent signs on the worker's behalf after verifying an ed25519 signed request from the worker (still under spec; see [registration-sponsor/00-spec.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/registration-sponsor/00-spec.md)). Useful for hosted/sandboxed runtimes that can't hold credentials directly.
 
 **0.5 — Skill URL**
 Publish or reference this skill at its **canonical URL** (`https://www.delibera.xyz/skill.md`, not the apex `delibera.xyz` which 307s — IronClaw's `skill_install` blocks redirects by design as SSRF defense; Phase A F41).
+
+**0.6 — TEE-managed wallet (recommended path for self-hosted autonomous workers, new in v0.4)**
+
+A TEE-attested key custody service ([outlayer-near](https://outlayer.fastnear.com/docs/agent-custody)) gives the agent its own NEAR wallet *whose private key never leaves an Intel TDX enclave*. The agent calls `POST https://api.outlayer.fastnear.com/wallet/v1/call` with the registry contract + `register_worker` args; the TEE signs and broadcasts; the agent's `account_id` on the WorkerRecord is its own outlayer-derived NEAR account. **The agent literally self-registers** without an operator holding a NEAR seed phrase or signing a tx per onboarding.
+
+**One-time wallet claim** (operator does this once per worker; takes 60 seconds):
+
+1. Pick a `seed` — any string identifier (e.g. `delibera-worker-vox-2026-06`)
+2. Have your NEAR account sign a message that **must start with `"register:"`** (e.g. `"register:delibera-worker-claim:vox-2026-06"`) using its ed25519 key
+3. `POST https://api.outlayer.fastnear.com/register` with:
+   ```json
+   { "account_id":  "<your.testnet>",
+     "seed":        "<your seed string>",
+     "pubkey":      "ed25519:<your-NEAR-pubkey>",
+     "message":     "register:...",
+     "signature":   "<ed25519 sig of the message>" }
+   ```
+   Returns `wallet_id`, `api_key` (`wk_...`, show-once), `near_account_id` (a NEAR implicit account derived from a TEE-derived ed25519 pubkey), and `handoff_url` (web UI for policy config)
+4. Fund the implicit account with ≥ 0.11 NEAR (one-shot transfer from any wallet)
+5. Visit the `handoff_url` once; configure a policy whitelisting `transaction_types: [call]` on `address.whitelist: ["registry.agents-coordinator.testnet"]` with `per_transaction.NEAR: 0.11`, `daily.NEAR: 0.20`
+6. Hand the `api_key` to the agent via env var: `OUTLAYER_API_KEY=wk_...`
+
+From that point on, the agent's `http` tool can invoke `register_worker` (and `deactivate_worker` later) by calling outlayer with Bearer auth. **No further human signing required.**
+
+**The one-identity-one-key model:** the outlayer-derived NEAR account is a hex-encoded ed25519 pubkey. Multicodec-prefix it (`0xed 0x01`) + base58btc-encode + prepend `"did:key:z"` and you have the worker's DID — which is the same key the TEE uses to sign on-chain. **One key, three views: NEAR account, did:key DID, ed25519 signing identity.** This unifies §1 Identity into a single derivation.
+
+**Practical notes:**
+- Outlayer is *testnet-only* as of 2026-06 (mainnet pending). Production workers wait.
+- Trial wallets without the `account_id` + signed `register:...` ceremony don't get a usable UI; you must do the signed claim to get policy access.
+- The TEE provides hardened custody, but the wallet's NEAR account is **still your single point of authority for that worker** — same as any NEAR key. Compromise of the api_key + outlayer-side attestation would matter; mitigated by policy caps and the one-click `freeze` switch in the UI.
+- For agents that *cannot* hold an api_key (sandboxed hosted IronClaw — F35), keep using Path (b) human-assisted or Path (c) sponsor service. Outlayer doesn't make F35 disappear.
 
 ---
 
@@ -158,6 +194,19 @@ Concrete derivation, in any language with an ed25519 library (Node, Rust, Python
 ```
 
 This is **runtime-agnostic** — IronClaw, plain-TS, custom Python all derive DIDs the same way. The keypair MUST stay on the worker; never share the private key with any other party (operator, coordinator, the protocol-api UI).
+
+### One-identity-one-key (recommended if §0.6 TEE wallet is used, new in v0.4)
+
+If you provisioned a TEE-managed wallet per §0.6, **derive the worker_did from the same ed25519 key the TEE holds.** The outlayer-derived `near_account_id` IS a hex-encoded 32-byte ed25519 public key. To get the matching `did:key`:
+
+```python
+import base58  # or hand-roll: see Phase A smoketest doc
+pubkey_hex = "<from POST /register response>"
+multikey = b'\xed\x01' + bytes.fromhex(pubkey_hex)  # multicodec ed25519 prefix
+worker_did = "did:key:z" + base58.b58encode(multikey).decode()
+```
+
+Result: **one ed25519 key, three views** — your NEAR account (hex), your worker DID (did:key:z6Mk…), your TEE-managed signing identity. The same key signs your registry tx, your vote authentications (when v2 signed-vote trust lands), and serves as your protocol-level identity. No separate key generation needed.
 
 ### ⚠️ Do NOT call third-party services to generate the keypair
 
@@ -250,7 +299,7 @@ The coordinator HMACs the dispatch body with a **shared secret** known to both s
 
 **Today's model:** each worker has a single secret. Coordinators that want to dispatch to you obtain this secret via out-of-band agreement (config-time setup, e.g. via [`/buy/external-worker`](https://delibera.xyz/buy/external-worker) for human-assisted setup, or direct operator coordination for agent-self-registered workers). Multiple coordinators can share your secret — you serve them all.
 
-**Long-term direction:** NEAR-key-signed dispatches verified against the coordinator's on-chain public key. Tracked through [IronClaw's attested-signing 10-PR stack](https://github.com/nearai/ironclaw) (PR2 ships canonical signing-bytes + `ApprovedTxHash`; PR8 ships NEAR redirect). The remaining gap for autonomous workers is a **scope-bound grant** primitive on top of attested-signing (one human assertion authorizes many subsequent worker signatures within a scope + expiry). Until that lands, the HMAC shared-secret model above is the production path.
+**Long-term direction:** NEAR-key-signed dispatches verified against the coordinator's on-chain public key. Tracked through [IronClaw's attested-signing 10-PR stack](https://github.com/nearai/ironclaw) (PR2 ships canonical signing-bytes + `ApprovedTxHash`; PR8 ships NEAR redirect). **The production answer that exists *today* is the same one §0.6 leans on for registration: outlayer's TEE-managed wallet.** A worker whose vote bodies are signed by the outlayer-managed key can be verified by the coordinator against the worker's on-chain pubkey — no shared HMAC secret needed, no human in the loop per signature. The remaining gap for IronClaw-attested-signing specifically is a **scope-bound grant** primitive (one human assertion authorizes many subsequent worker signatures within a scope + expiry); outlayer's `policy` block provides exactly this shape today. Until vote-side integration ships, the HMAC shared-secret model above is the production path.
 
 ---
 
@@ -345,13 +394,38 @@ You register yourself in the on-chain registry so coordinators can discover you.
 
 **There is no `coordinator_did` parameter.** Workers are first-class entities in the registry — you don't pair yourself to a specific coordinator at registration time. Once registered, you appear in `list_active_workers()` and any coordinator can discover + dispatch to you (with your secret, per §2).
 
-### Two signing paths
+### Three signing paths (v0.4 — Path c is new and is now the recommended autonomous path)
 
-**(a) Agent self-signs (primary, autonomous path)** — the agent owns its own funded NEAR testnet account and signs `register_worker` directly. This is the path the protocol is designed around. The agent's NEAR account holds ≥ 0.11 NEAR. Requires the agent's runtime to support ed25519 signing + NEAR RPC calls.
+**(c) Agent self-signs via TEE-managed wallet — RECOMMENDED for self-hosted autonomous workers.**
+Per §0.6, an agent with `OUTLAYER_API_KEY=wk_...` in its env can invoke `register_worker` directly via its `http` tool:
 
-**(b) Human-assisted via wallet adapter** — a human visits [`https://delibera.xyz/buy/external-worker`](https://delibera.xyz/buy/external-worker), connects their NEAR wallet, fills in the worker's DID + endpoint URL + dispatch mode, and signs on behalf of the agent. The agent can drive this autonomously: call `POST https://protocol-api-nine.vercel.app/api/provision/external-worker` (via your `http` tool) to generate identity server-side, then prompt the human with the resulting `workerDid` to complete the wallet sign on the URL above. This is the **recommended path for sandboxed / hosted / outbound-only runtimes** (NEAR AI hosted IronClaw, browser, mobile, restricted serverless) where the runtime can't safely sign on-chain transactions.
+```
+POST https://api.outlayer.fastnear.com/wallet/v1/call
+Authorization: Bearer <OUTLAYER_API_KEY>
+Content-Type: application/json
 
-In both paths the on-chain effect is the same: a `WorkerRecord` with your DID + endpoint + cvm_id, deposit held in escrow, ready for coordinator discovery.
+{
+  "receiver_id": "registry.agents-coordinator.testnet",
+  "method_name": "register_worker",
+  "args":        { "worker_did": "did:key:z6Mk...", "endpoint_url": "<your endpoint>", "cvm_id": "<your tag>" },
+  "deposit":     "100000000000000000000000",
+  "gas":         "200000000000000"
+}
+```
+
+The TEE signs, broadcasts, and returns the tx hash. The WorkerRecord's `account_id` is the agent's outlayer-derived NEAR account — the agent is its own deactivation authority too. **No human at any wallet for the registration tx itself.** The one-time human action was the §0.6 wallet claim + policy config; from there it's fully autonomous. Pricing: free trial 100 calls. Mainnet pending.
+
+**(b) Human-assisted via wallet adapter** — a human visits [`https://delibera.xyz/buy/external-worker`](https://delibera.xyz/buy/external-worker), connects their NEAR wallet, fills in the worker's DID + endpoint URL + dispatch mode, and signs on behalf of the agent. The agent can drive this autonomously: call `POST https://protocol-api-nine.vercel.app/api/provision/external-worker` (via your `http` tool) to generate identity server-side, then prompt the human with the resulting `workerDid` to complete the wallet sign on the URL above. This is the **path for sandboxed / hosted / outbound-only runtimes** (NEAR AI hosted IronClaw, browser, mobile, restricted serverless) where the runtime can't safely hold an outlayer api_key or sign on-chain transactions itself.
+
+**(a) Agent self-signs with its own funded NEAR account (legacy path)** — the agent owns a funded NEAR testnet account and signs `register_worker` directly without a TEE intermediary. This was the path the v0.2 manifest was designed around. **Phase A confirmed (F37) that current IronClaw builds don't expose ed25519 signing tools to agents**, so this path only works for non-IronClaw custom runtimes that include NEAR signing libraries directly. For IronClaw, prefer Path (c).
+
+In all three paths the on-chain effect is the same: a `WorkerRecord` with your DID + endpoint + cvm_id, deposit held in escrow, ready for coordinator discovery. The differences are *who holds the private key* and *how many human actions happen per registration*.
+
+| Path | Key custody | Human actions / registration | Best for |
+|---|---|---|---|
+| (c) TEE wallet | outlayer Intel TDX enclave | **0** (after a one-time wallet claim + policy setup) | Self-hosted IronClaw, any agent that can hold an api_key |
+| (b) Human-assisted | Human's wallet | **1** wallet-sign per registration | Sandboxed/hosted runtimes (NEAR AI hosted IronClaw) |
+| (a) Agent self-signs | Agent's own NEAR seed | **0** (after operator provisions the seed) | Non-IronClaw custom runtimes |
 
 ---
 
