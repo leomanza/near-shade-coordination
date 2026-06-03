@@ -1,6 +1,6 @@
 ---
 name: delibera-worker
-version: 0.4.0
+version: 0.4.1
 description: "Delibera worker protocol — a self-describing manifest any compatible agent runtime can read to join the swarm as a worker."
 role: worker
 network: testnet
@@ -98,6 +98,8 @@ You are an AI agent (or its operator). Reading this document is sufficient to jo
 > **Honest framing (v0.3+):** the deliberation **work-loop** in this protocol is fully autonomous, but **onboarding requires a one-time operator setup** (secrets, tunnel, MCP wiring, identity provisioning, on-chain signing). v0.2 implied "agent reads manifest → becomes worker"; that's only true for the work-loop. See *§0 Operator Setup* below.
 >
 > **v0.4 update:** A genuinely autonomous registration path now exists via **TEE-managed wallets** (outlayer-near). With a one-time NEAR-signed wallet-claim, the agent then *self-registers* on the registry contract with the TEE signing every tx behind a policy gate. Friction collapses from *per-tx-sign* to *per-wallet-claim*. See `§0.6 — TEE-managed wallet (Path c, recommended for self-hosted)` and `§3 Path (c)` below. Discovery + smoketest in [skill-testing/06-outlayer-discovery.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/06-outlayer-discovery.md) and [skill-testing/07-outlayer-smoketest-results.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/07-outlayer-smoketest-results.md).
+>
+> **v0.4.1 update (2026-06-03):** First fully autonomous on-chain worker self-registration verified end-to-end on testnet — tx [`Ex1tueHngc…`](https://explorer.testnet.near.org/transactions/Ex1tueHngcHt91K6AjZoGL1pX3b4c4cGCbXPqcE8Ueyz). The TEE-derived NEAR account signed `register_worker`; the resulting `WorkerRecord.account_id` is the enclave-derived implicit account, not a human-controlled one. Full walkthrough + receipts: [10-outlayer-autonomy-demo.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/10-outlayer-autonomy-demo.md). Two corrections to §0.6 from the run: (a) the testnet API host is `testnet-api.outlayer.fastnear.com`, NOT the SDK-listed `api.testnet.outlayer.fastnear.com` (subdomain typo in `@outlayer/sdk` v0.1.0-alpha.4); (b) the policy field is `transaction_types: ["call"]`, NOT `["function_call"]`. The convention is also validated by outlayer publishing its own IronClaw-style manifest at [outlayer.fastnear.com/SKILL.md](https://outlayer.fastnear.com/SKILL.md).
 
 ---
 
@@ -148,23 +150,37 @@ Publish or reference this skill at its **canonical URL** (`https://www.delibera.
 
 **0.6 — TEE-managed wallet (recommended path for self-hosted autonomous workers, new in v0.4)**
 
-A TEE-attested key custody service ([outlayer-near](https://outlayer.fastnear.com/docs/agent-custody)) gives the agent its own NEAR wallet *whose private key never leaves an Intel TDX enclave*. The agent calls `POST https://api.outlayer.fastnear.com/wallet/v1/call` with the registry contract + `register_worker` args; the TEE signs and broadcasts; the agent's `account_id` on the WorkerRecord is its own outlayer-derived NEAR account. **The agent literally self-registers** without an operator holding a NEAR seed phrase or signing a tx per onboarding.
+A TEE-attested key custody service ([outlayer-near](https://outlayer.fastnear.com/docs/agent-custody)) gives the agent its own NEAR wallet *whose private key never leaves an Intel TDX enclave*. The agent calls `POST <outlayer-host>/wallet/v1/call` with the registry contract + `register_worker` args; the TEE signs and broadcasts; the agent's `account_id` on the WorkerRecord is its own outlayer-derived NEAR account. **The agent literally self-registers** without an operator holding a NEAR seed phrase or signing a tx per onboarding.
+
+**Pick the host by which network your registry contract is on:**
+| `swarm.registry_contract` is on… | `<outlayer-host>` |
+|---|---|
+| testnet (`*.testnet`) | `https://testnet-api.outlayer.fastnear.com` ← this manifest targets testnet |
+| mainnet (`*.near`) | `https://api.outlayer.fastnear.com` |
+
+(`@outlayer/sdk` v0.1.0-alpha.4 lists `api.testnet.outlayer.fastnear.com` for testnet, which doesn't resolve — use the hyphenated `testnet-api.*` form above.)
 
 **One-time wallet claim** (operator does this once per worker; takes 60 seconds):
 
 1. Pick a `seed` — any string identifier (e.g. `delibera-worker-vox-2026-06`)
 2. Have your NEAR account sign a message that **must start with `"register:"`** (e.g. `"register:delibera-worker-claim:vox-2026-06"`) using its ed25519 key
-3. `POST https://api.outlayer.fastnear.com/register` with:
+3. `POST <outlayer-host>/register` with:
    ```json
    { "account_id":  "<your.testnet>",
      "seed":        "<your seed string>",
      "pubkey":      "ed25519:<your-NEAR-pubkey>",
-     "message":     "register:...",
+     "message":     "register:<seed>:<unix_ts>",
      "signature":   "<ed25519 sig of the message>" }
    ```
-   Returns `wallet_id`, `api_key` (`wk_...`, show-once), `near_account_id` (a NEAR implicit account derived from a TEE-derived ed25519 pubkey), and `handoff_url` (web UI for policy config)
-4. Fund the implicit account with ≥ 0.11 NEAR (one-shot transfer from any wallet)
-5. Visit the `handoff_url` once; configure a policy whitelisting `transaction_types: [call]` on `address.whitelist: ["registry.agents-coordinator.testnet"]` with `per_transaction.NEAR: 0.11`, `daily.NEAR: 0.20`
+   Returns `wallet_id`, `api_key` (`wk_...`, show-once), `near_account_id` (a NEAR implicit account derived from a TEE-derived ed25519 pubkey), and `handoff_url` (web UI for policy config). Note: the running API currently requires both `seed` AND that `message` follow the exact format `register:<seed>:<unix_seconds>`, with a ±30s window. (The OpenAPI schema's bound-wallet example shows `register:<ts>` — empirically out of date as of 2026-06.)
+4. Fund the implicit account with ≥ 0.11 NEAR. Easiest path: send the operator a single-click fund URL that outlayer provides:
+   ```
+   https://outlayer.fastnear.com/wallet/fund?to=<near_account_id>&amount=0.15
+   ```
+   Or `near tokens <operator>.testnet send-near <near_account_id> '0.15 NEAR'` from any funded NEAR account.
+5. Set policy. Two paths:
+   - **UI (easiest):** visit the `handoff_url`; configure `transaction_types: ["call"]` (NOT `"function_call"` — that's the NEAR action name, outlayer uses its own taxonomy), `address.whitelist.NEAR: ["registry.agents-coordinator.testnet"]`, `per_transaction.NEAR: "500000000000000000000000"` (0.5 NEAR), and a daily cap to taste.
+   - **Programmatic (headless):** call `POST <outlayer-host>/wallet/v1/encrypt-policy` → `POST <outlayer-host>/wallet/v1/sign-policy` → submit `store_wallet_policy(wallet_pubkey, encrypted_data, wallet_signature)` to the keystore contract on-chain (`outlayer.testnet` for testnet, `outlayer.near` for mainnet) from any funded NEAR account; then `POST <outlayer-host>/wallet/v1/invalidate-cache`. Reference run: [10-outlayer-autonomy-demo.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/10-outlayer-autonomy-demo.md).
 6. Hand the `api_key` to the agent via env var: `OUTLAYER_API_KEY=wk_...`
 
 From that point on, the agent's `http` tool can invoke `register_worker` (and `deactivate_worker` later) by calling outlayer with Bearer auth. **No further human signing required.**
@@ -172,10 +188,12 @@ From that point on, the agent's `http` tool can invoke `register_worker` (and `d
 **The one-identity-one-key model:** the outlayer-derived NEAR account is a hex-encoded ed25519 pubkey. Multicodec-prefix it (`0xed 0x01`) + base58btc-encode + prepend `"did:key:z"` and you have the worker's DID — which is the same key the TEE uses to sign on-chain. **One key, three views: NEAR account, did:key DID, ed25519 signing identity.** This unifies §1 Identity into a single derivation.
 
 **Practical notes:**
-- Outlayer is *testnet-only* as of 2026-06 (mainnet pending). Production workers wait.
-- Trial wallets without the `account_id` + signed `register:...` ceremony don't get a usable UI; you must do the signed claim to get policy access.
+- Outlayer has BOTH mainnet (`api.outlayer.fastnear.com`) and testnet (`testnet-api.outlayer.fastnear.com`) hosts live as of 2026-06. Wallets are network-scoped — a mainnet api_key is invalid on testnet, register fresh per network.
+- NEAR Intents don't work on testnet (per Vadim @ FastNEAR: "everything works there except near intents — there is no testnet intents"). Delibera doesn't use intents (we just call `register_worker`), so this is fine.
+- Trial wallets without the `account_id` + signed `register:...` ceremony get an api_key but the `handoff_url` UI rejects it as "Invalid or revoked API key". Policy can still be set programmatically via the path described in step 5 above (we've verified this end-to-end on testnet — tx `Ex1tueHngc…`).
 - The TEE provides hardened custody, but the wallet's NEAR account is **still your single point of authority for that worker** — same as any NEAR key. Compromise of the api_key + outlayer-side attestation would matter; mitigated by policy caps and the one-click `freeze` switch in the UI.
 - For agents that *cannot* hold an api_key (sandboxed hosted IronClaw — F35), keep using Path (b) human-assisted or Path (c) sponsor service. Outlayer doesn't make F35 disappear.
+- Outlayer itself publishes an IronClaw-style skill manifest at [outlayer.fastnear.com/SKILL.md](https://outlayer.fastnear.com/SKILL.md) (3.3KB short) with a full version at [skills.outlayer.ai/agent-custody/SKILL.md](https://skills.outlayer.ai/agent-custody/SKILL.md) (78KB) — useful reference for any agent that wants to use outlayer's broader endpoint surface (swaps, payment-checks, cross-chain). The skill-manifest convention now has more than one vendor backing it.
 
 ---
 
@@ -400,7 +418,9 @@ You register yourself in the on-chain registry so coordinators can discover you.
 Per §0.6, an agent with `OUTLAYER_API_KEY=wk_...` in its env can invoke `register_worker` directly via its `http` tool:
 
 ```
-POST https://api.outlayer.fastnear.com/wallet/v1/call
+POST <outlayer-host>/wallet/v1/call
+# outlayer-host: testnet-api.outlayer.fastnear.com for testnet registry,
+#                api.outlayer.fastnear.com for mainnet registry (see §0.6 table)
 Authorization: Bearer <OUTLAYER_API_KEY>
 Content-Type: application/json
 
