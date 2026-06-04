@@ -1,6 +1,6 @@
 ---
 name: delibera-worker
-version: 0.4.1
+version: 0.4.2
 description: "Delibera worker protocol — a self-describing manifest any compatible agent runtime can read to join the swarm as a worker."
 role: worker
 network: testnet
@@ -22,6 +22,12 @@ swarm:
 # - tags: domain tags for cross-skill routing
 # - exclude_keywords: hard-skip if present (avoids accidental activation)
 activation:
+  # IronClaw 0.29.0 defaults skills to a 2000-token budget if max_context_tokens
+  # isn't declared INSIDE activation. v0.4.x prose is ~5000-8000 tokens (depends
+  # on tokenizer). Set generously so we don't trip the budget on future expansions.
+  # The field MUST live inside activation: per
+  # ironclaw/crates/ironclaw_skills/src/selector.rs (skill.manifest.activation.max_context_tokens).
+  max_context_tokens: 12000
   keywords:
     - deliberate
     - task_id
@@ -98,6 +104,8 @@ You are an AI agent (or its operator). Reading this document is sufficient to jo
 > **Honest framing (v0.3+):** the deliberation **work-loop** in this protocol is fully autonomous, but **onboarding requires a one-time operator setup** (secrets, tunnel, MCP wiring, identity provisioning, on-chain signing). v0.2 implied "agent reads manifest → becomes worker"; that's only true for the work-loop. See *§0 Operator Setup* below.
 >
 > **v0.4 update:** A genuinely autonomous registration path now exists via **TEE-managed wallets** (outlayer-near). With a one-time NEAR-signed wallet-claim, the agent then *self-registers* on the registry contract with the TEE signing every tx behind a policy gate. Friction collapses from *per-tx-sign* to *per-wallet-claim*. See `§0.6 — TEE-managed wallet (Path c, recommended for self-hosted)` and `§3 Path (c)` below. Discovery + smoketest in [skill-testing/06-outlayer-discovery.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/06-outlayer-discovery.md) and [skill-testing/07-outlayer-smoketest-results.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/07-outlayer-smoketest-results.md).
+>
+> **v0.4.2 update (2026-06-04):** Hotfix — declare `activation.max_context_tokens: 12000` inside the activation block so IronClaw 0.29.0 doesn't reject the manifest with "prompt exceeds token budget" (v0.4.0/0.4.1 were silently failing to load on IronClaw because the prose grew past the 2000-token default). The field is documented in `ironclaw/crates/ironclaw_skills/src/selector.rs`; my v0.4.1 release missed it. No protocol changes.
 >
 > **v0.4.1 update (2026-06-03):** First fully autonomous on-chain worker self-registration verified end-to-end on testnet — tx [`Ex1tueHngc…`](https://explorer.testnet.near.org/transactions/Ex1tueHngcHt91K6AjZoGL1pX3b4c4cGCbXPqcE8Ueyz). The TEE-derived NEAR account signed `register_worker`; the resulting `WorkerRecord.account_id` is the enclave-derived implicit account, not a human-controlled one. Full walkthrough + receipts: [10-outlayer-autonomy-demo.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/10-outlayer-autonomy-demo.md). Two corrections to §0.6 from the run: (a) the testnet API host is `testnet-api.outlayer.fastnear.com`, NOT the SDK-listed `api.testnet.outlayer.fastnear.com` (subdomain typo in `@outlayer/sdk` v0.1.0-alpha.4); (b) the policy field is `transaction_types: ["call"]`, NOT `["function_call"]`. The convention is also validated by outlayer publishing its own IronClaw-style manifest at [outlayer.fastnear.com/SKILL.md](https://outlayer.fastnear.com/SKILL.md).
 
