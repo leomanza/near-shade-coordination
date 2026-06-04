@@ -42,7 +42,11 @@ export default function PolicyScreen({ onboard, auth }: Props) {
               methodName: "store_wallet_policy",
               args: policy as unknown as Record<string, unknown>,
               gas: "100000000000000", // 100 Tgas
-              deposit: "1000000000000000000000", // 0.001 NEAR
+              // Storage deposit covers the encrypted policy bytes on outlayer's
+              // keystore contract. Empirically ~0.00725 NEAR for a default-shape
+              // policy; we attach 0.01 with a margin so policy shape changes
+              // don't break us. Excess is refunded by NEAR's storage rebate.
+              deposit: "10000000000000000000000", // 0.01 NEAR
             },
           },
         ],
@@ -70,10 +74,20 @@ export default function PolicyScreen({ onboard, auth }: Props) {
     <main className="mx-auto max-w-xl p-8">
       <h1 className="text-2xl font-bold">Commit policy on-chain</h1>
       <p className="mt-2 text-gray-600">
-        One small NEAR transaction (≈ 0.001 NEAR storage) tells the outlayer
-        keystore which contracts your wallet is allowed to call. After this,
-        your agent self-registers without any further signing.
+        One small NEAR transaction (≈ 0.01 NEAR storage, refundable on policy
+        delete) tells the outlayer keystore which contracts your wallet is
+        allowed to call. After this, your agent self-registers without any
+        further signing.
       </p>
+
+      <div className="mt-4 rounded bg-blue-50 p-3 text-xs text-blue-900">
+        <strong>Two wallets at play:</strong> this transaction is signed by
+        your operator NEAR account (the one connected above). It records you
+        as the policy owner on <code>{KEYSTORE_CONTRACT}</code>. The
+        outlayer-derived implicit account ({onboard.state.wallet?.near_account_id?.slice(0, 8)}…)
+        is a separate identity whose private key lives in the TEE — it can&rsquo;t
+        sign on its own; that&rsquo;s the whole point.
+      </div>
 
       <div className="mt-4 rounded bg-gray-50 p-4 text-sm">
         <h3 className="font-semibold">Policy summary</h3>
