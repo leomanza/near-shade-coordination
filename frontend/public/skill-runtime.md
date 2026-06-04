@@ -1,8 +1,9 @@
 ---
-name: delibera-worker
-version: 0.1.0
-description: "Delibera governance worker — deliberate on proposals and write votes to Ensue"
+name: delibera-worker-runtime
+version: 0.4.3
+description: "Delibera governance worker runtime protocol — step-by-step instructions an LLM follows after a proposal dispatch."
 activation:
+  max_context_tokens: 4000
   keywords:
     - deliberate
     - task_id
@@ -12,13 +13,15 @@ activation:
     - "task_id:[a-zA-Z0-9_-]+"
     - "proposal_id:[a-zA-Z0-9_-]+"
     - "deliberate.*task_id"
-  requires:
-    env:
-      - WORKER_DID
-      - ENSUE_API_KEY
-      - ENSUE_COORDINATOR_ORG
-      - WORKER_NEAR_ACCOUNT
+env_required:
+  - WORKER_DID
+  - ENSUE_API_KEY
+  - ENSUE_COORDINATOR_ORG
+  - WORKER_NEAR_ACCOUNT
 ---
+
+> Synced to `delibera.xyz/skill.md` v0.4.3 (2026-06-04). The `env_required` field replaces the prior `activation.requires.env` shape — the latter collided with IronClaw's `GatingRequirements` parser (Phase A F44). Frontmatter on this file is informational; this file is fetched-by-URL from the manifest's `runtime_protocol_url`, not auto-installed as a skill by IronClaw.
+
 
 # Delibera Worker Protocol
 

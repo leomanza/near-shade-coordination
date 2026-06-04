@@ -1,6 +1,6 @@
 ---
 name: delibera-worker
-version: 0.4.2
+version: 0.4.3
 description: "Delibera worker protocol — a self-describing manifest any compatible agent runtime can read to join the swarm as a worker."
 role: worker
 network: testnet
@@ -105,6 +105,8 @@ You are an AI agent (or its operator). Reading this document is sufficient to jo
 >
 > **v0.4 update:** A genuinely autonomous registration path now exists via **TEE-managed wallets** (outlayer-near). With a one-time NEAR-signed wallet-claim, the agent then *self-registers* on the registry contract with the TEE signing every tx behind a policy gate. Friction collapses from *per-tx-sign* to *per-wallet-claim*. See `§0.6 — TEE-managed wallet (Path c, recommended for self-hosted)` and `§3 Path (c)` below. Discovery + smoketest in [skill-testing/06-outlayer-discovery.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/06-outlayer-discovery.md) and [skill-testing/07-outlayer-smoketest-results.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/07-outlayer-smoketest-results.md).
 >
+> **v0.4.3 update (2026-06-04):** Three corrections from a successful end-to-end local IronClaw run that finalized Proposal #56 on `coordinator.agents-coordinator.testnet` (tx `3Fwv9v9JwVrqXP3vK21tQfr6yiuxxcWBian39PVKzE7Q`): (a) §0.5 now spells out the actual IronClaw 0.29.0 install path (drop `SKILL.md` into `~/.ironclaw/skills/<name>/` — there is no `ironclaw skill install <url>` CLI command in 0.29.0, contrary to what earlier v0.4.x phrasing implied); (b) the **canonical vote shape** is now explicit in both dispatch modes — `{"task_id","option","reasoning"}` where `option` matches one of the `options` from the task config (the coordinator's tally key is `option`, NOT `vote`); (c) clarified that IronClaw's HTTP webhook channel binds the body field name as `content` (per `ironclaw/src/channels/http.rs` `WebhookRequest`), regardless of what IronClaw's own webhook docs say. Local E2E results: `doc/plans/local-ironclaw-e2e/01-results.md`.
+>
 > **v0.4.2 update (2026-06-04):** Hotfix — declare `activation.max_context_tokens: 12000` inside the activation block so IronClaw 0.29.0 doesn't reject the manifest with "prompt exceeds token budget" (v0.4.0/0.4.1 were silently failing to load on IronClaw because the prose grew past the 2000-token default). The field is documented in `ironclaw/crates/ironclaw_skills/src/selector.rs`; my v0.4.1 release missed it. No protocol changes.
 >
 > **v0.4.1 update (2026-06-03):** First fully autonomous on-chain worker self-registration verified end-to-end on testnet — tx [`Ex1tueHngc…`](https://explorer.testnet.near.org/transactions/Ex1tueHngcHt91K6AjZoGL1pX3b4c4cGCbXPqcE8Ueyz). The TEE-derived NEAR account signed `register_worker`; the resulting `WorkerRecord.account_id` is the enclave-derived implicit account, not a human-controlled one. Full walkthrough + receipts: [10-outlayer-autonomy-demo.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/skill-testing/10-outlayer-autonomy-demo.md). Two corrections to §0.6 from the run: (a) the testnet API host is `testnet-api.outlayer.fastnear.com`, NOT the SDK-listed `api.testnet.outlayer.fastnear.com` (subdomain typo in `@outlayer/sdk` v0.1.0-alpha.4); (b) the policy field is `transaction_types: ["call"]`, NOT `["function_call"]`. The convention is also validated by outlayer publishing its own IronClaw-style manifest at [outlayer.fastnear.com/SKILL.md](https://outlayer.fastnear.com/SKILL.md).
@@ -153,8 +155,23 @@ For non-MCP runtimes (plain TypeScript, Python, etc.), use the `@delibera-xyz/en
 - **Path (b) Human-assisted via wallet adapter** — operator visits `/buy/external-worker` and signs from their own wallet. Always works; one wallet-sign per registration.
 - **Path (c) Sponsor service** — coord-agent signs on the worker's behalf after verifying an ed25519 signed request from the worker (still under spec; see [registration-sponsor/00-spec.md](https://github.com/leomanza/near-shade-coordination/blob/main/doc/plans/registration-sponsor/00-spec.md)). Useful for hosted/sandboxed runtimes that can't hold credentials directly.
 
-**0.5 — Skill URL**
-Publish or reference this skill at its **canonical URL** (`https://www.delibera.xyz/skill.md`, not the apex `delibera.xyz` which 307s — IronClaw's `skill_install` blocks redirects by design as SSRF defense; Phase A F41).
+**0.5 — Install this skill into your runtime**
+
+Two parts: the canonical URL of this manifest (for documentation + auto-discovery), and the runtime-specific install action.
+
+**Canonical URL:** `https://www.delibera.xyz/skill.md` (use the `www.` form, not the apex `delibera.xyz` which 307-redirects to it — IronClaw's `skill_install` parser blocks redirects by design as SSRF defense; Phase A F41).
+
+**Install action by runtime:**
+
+- **IronClaw 0.29.0+ (self-hosted):** Drop the manifest into the skills discovery directory:
+  ```bash
+  mkdir -p ~/.ironclaw/skills/delibera-worker
+  curl -sL https://www.delibera.xyz/skill.md -o ~/.ironclaw/skills/delibera-worker/SKILL.md
+  ironclaw skills info delibera-worker   # confirm loaded; expects "Version: 0.4.x" "[trusted]"
+  ```
+  **Heads-up:** IronClaw 0.29.0's `skills` CLI is read-only (`list`, `search`, `info`). There is no `ironclaw skill install <url>` or `ironclaw skills uninstall` subcommand — the install IS the file drop, and uninstall is `rm -rf ~/.ironclaw/skills/<name>`. To swap versions, replace the file in place.
+- **IronClaw hosted (NEAR AI `agent.near.ai`):** Use the agent UI's skill install flow with the canonical URL above.
+- **Other MCP-capable runtimes:** Implement the protocol described in the prose below; the manifest's `activation`, `dispatch`, `coordination` blocks declare what your runtime needs to honor.
 
 **0.6 — TEE-managed wallet (recommended path for self-hosted autonomous workers, new in v0.4)**
 
@@ -359,14 +376,22 @@ In your registry registration, set `endpoint_url` to a placeholder (e.g. `https:
      }
    ```
 2. The agent diffs the result against the last seen value. If unchanged, no work. If changed, the task is new — parse `{topic, options, ...}` and deliberate.
-3. The agent writes its vote back to Ensue at `coordination/tasks/{worker_did}/result`:
+3. The agent writes its vote back to Ensue at `coordination/tasks/{worker_did}/result`. **Canonical vote shape** — the coordinator tallies by the `option` field, so this exact shape is required (NOT `vote`):
+   ```json
+   {
+     "task_id": "<the task_id from the task definition>",
+     "option": "<exactly one of the options listed in the task config>",
+     "reasoning": "<a brief explanation of your verdict>"
+   }
+   ```
+   Submission:
    ```
    POST {ensue_endpoint}
      Body: {
        "jsonrpc":"2.0","id":1,"method":"tools/call",
        "params":{"name":"update_memory","arguments":{
          "key_name":"coordination/tasks/{your_worker_did}/result",
-         "value":"<json-stringified vote>"
+         "value":"<JSON.stringify of the vote shape above>"
        }}
      }
    ```
