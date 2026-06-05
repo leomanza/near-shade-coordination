@@ -2,7 +2,10 @@
 import { useEffect, useState } from "react";
 import type { AuthState } from "@/lib/auth";
 import { onboardOutlayer } from "../lib/outlayer-client-browser";
-import { workerDidFromNearAccount } from "../lib/worker-did-derivation";
+import {
+  workerDidFromNearAccount,
+  controllerPubkeyBase58FromNearAccount,
+} from "../lib/worker-did-derivation";
 import type { OnboardingApi } from "../hooks/useOutlayerOnboarding";
 
 interface Props {
@@ -38,12 +41,20 @@ export default function RegisterScreen({ onboard, mode }: Props) {
         } else {
           const { wallet, worker_did, endpoint_url, cvm_id } = onboard.state;
           if (!wallet || !worker_did) throw new Error("missing wallet state");
+          // V3.1.1: bind the controller_pubkey to the same TEE key that owns
+          // the worker_did. The outlayer-derived near_account_id IS the hex of
+          // that ed25519 pubkey, so the worker is sovereign-deactivatable via
+          // its own enclave key (no admin / registrant signature needed later).
+          const controller_pubkey = controllerPubkeyBase58FromNearAccount(
+            wallet.near_account_id,
+          );
           const r = await onboardOutlayer.registerWorker({
             api_key: wallet.api_key,
             worker_did,
             endpoint_url,
             cvm_id,
             registry_contract_id: REGISTRY_CONTRACT_ID,
+            controller_pubkey,
           });
           if (cancelled) return;
           onboard.dispatch({ type: "set_register_tx", tx_hash: r.tx_hash });

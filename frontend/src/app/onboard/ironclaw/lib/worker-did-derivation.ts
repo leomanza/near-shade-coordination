@@ -64,3 +64,20 @@ export function ed25519PubkeyFromNearAccount(nearAccountIdHex: string): string {
   }
   return 'ed25519:' + base58btcEncode(hexToBytes(nearAccountIdHex));
 }
+
+/**
+ * Same key as ed25519PubkeyFromNearAccount, but returns the raw base58 string
+ * without the `ed25519:` prefix. This is the shape the registry contract's
+ * `register_worker_with_controller(controller_pubkey: String)` argument expects
+ * (it decodes base58 directly to a 32-byte array; no prefix).
+ *
+ * Used by the wizard so future-registered workers are deactivatable via the
+ * V3.1.1 `deactivate_worker_by_controller` path (signed by the same TEE key
+ * outlayer custodies for the worker).
+ */
+export function controllerPubkeyBase58FromNearAccount(nearAccountIdHex: string): string {
+  if (!HEX_RE.test(nearAccountIdHex) || nearAccountIdHex.length !== 64) {
+    throw new Error('invalid near_account_id');
+  }
+  return base58btcEncode(hexToBytes(nearAccountIdHex));
+}

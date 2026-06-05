@@ -318,8 +318,16 @@ function OverviewTab({
               const status = workerStatuses?.workers[w.worker_id] || "unknown";
               const displayName = workerStatuses?.workerNames?.[w.worker_id];
               const truncatedDid = w.worker_id.startsWith("did:") ? w.worker_id.substring(0, 20) + "..." : null;
-              return (
-                <div key={w.worker_id} className="flex items-center gap-3 p-3 rounded-lg bg-zinc-800/40">
+              // DID-based worker rows link to the Phase 1.5 detail page;
+              // legacy non-DID rows stay as static cards.
+              const detailHref = w.worker_id.startsWith("did:")
+                ? `/dashboard/worker/${encodeURIComponent(w.worker_id)}`
+                : null;
+              const rowClass =
+                "flex items-center gap-3 p-3 rounded-lg bg-zinc-800/40" +
+                (detailHref ? " hover:bg-zinc-800/70 transition-colors" : "");
+              const inner = (
+                <>
                   <StatusDot status={workerError ? "offline" : status} />
                   <div>
                     <p className="text-xs font-mono text-zinc-300 font-semibold">
@@ -334,6 +342,18 @@ function OverviewTab({
                   <span className="ml-auto text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-500">
                     {workerError ? "offline" : status}
                   </span>
+                  {detailHref && (
+                    <span className="text-zinc-600 text-xs">→</span>
+                  )}
+                </>
+              );
+              return detailHref ? (
+                <Link key={w.worker_id} href={detailHref} className={rowClass}>
+                  {inner}
+                </Link>
+              ) : (
+                <div key={w.worker_id} className={rowClass}>
+                  {inner}
                 </div>
               );
             })}

@@ -69,5 +69,7 @@ export const onboardOutlayer = {
     endpoint_url: string;
     cvm_id: string;
     registry_contract_id: string;
+    /** V3.1.1 sovereign-deactivation controller (base58 ed25519 pubkey). */
+    controller_pubkey?: string;
   }) => postJson<RegisterWorkerResult>('/api/onboard/register-worker', args),
 };

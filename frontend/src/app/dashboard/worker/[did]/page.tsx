@@ -254,41 +254,85 @@ export default function WorkerDetailPage() {
 
       <section className="mt-6 rounded-lg border bg-white p-4">
         <h2 className="text-sm font-semibold text-gray-900">Actions</h2>
+        <p className="mt-1 text-xs text-gray-500">
+          Both outlayer-side actions below currently surface their CLI flows
+          rather than a one-click UI. The byte-exact signing compat between
+          outlayer&rsquo;s raw mode and the contract&rsquo;s{" "}
+          <code>env::ed25519_verify</code> hasn&rsquo;t been empirically
+          tested; will wire as a UI button once verified end-to-end with a
+          real wallet.
+        </p>
 
         <div className="mt-3 space-y-3 text-sm">
-          <ActionButton
+          <CliPanel
             label="Freeze (outlayer)"
-            description="Tell outlayer's TEE to refuse any further /wallet/v1/call from this wallet — protocol-level kill switch. Requires the worker's OUTLAYER_API_KEY (operator must paste in)."
-            disabled={!isOutlayer}
-            disabledReason={
+            available={isOutlayer}
+            unavailableReason={
               !isOutlayer ? "Worker isn't outlayer-managed" : undefined
             }
-            onClick={() => {
-              alert(
-                "Freeze flow: prompt for OUTLAYER_API_KEY, POST <host>/wallet/v1/freeze. Not implemented in this pass — manual via curl for now.",
-              );
-            }}
+            summary="Freeze toggles the wallet's policy to refuse any /wallet/v1/call until unfrozen. Not a single endpoint — it's the same encrypt → sign → on-chain store_wallet_policy chain the wizard ran, but with `frozen: true` added to the rules."
+            cli={`# 1. Read current policy + encrypt with frozen:true
+OUTLAYER_HOST=https://testnet-api.outlayer.fastnear.com
+WALLET_ID=<your wallet_id>
+API_KEY=<your wk_...>
+
+ENC=$(curl -s -X POST $OUTLAYER_HOST/wallet/v1/encrypt-policy \\
+  -H "Authorization: Bearer $API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"wallet_id\\":\\"$WALLET_ID\\",\\"rules\\":{\\"frozen\\":true,\\"transaction_types\\":[]}}" | jq -r .encrypted_base64)
+
+SIG=$(curl -s -X POST $OUTLAYER_HOST/wallet/v1/sign-policy \\
+  -H "Authorization: Bearer $API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"encrypted_data\\":\\"$ENC\\"}" | jq -r .signature_hex)
+
+# 2. Submit to outlayer.testnet keystore (any funded NEAR account signs)
+near contract call-function as-transaction outlayer.testnet store_wallet_policy \\
+  json-args "{\\"wallet_pubkey\\":\\"ed25519:${ed25519Pub?.replace("ed25519:", "") ?? "<hex_pubkey>"}\\",\\"encrypted_data\\":\\"$ENC\\",\\"wallet_signature\\":\\"$SIG\\"}" \\
+  prepaid-gas '100 Tgas' attached-deposit '0.001 NEAR' \\
+  sign-as <your.testnet> network-config testnet sign-with-keychain send
+
+# 3. Invalidate outlayer's negative-policy cache
+curl -X POST $OUTLAYER_HOST/wallet/v1/invalidate-cache \\
+  -H "Authorization: Bearer $API_KEY" \\
+  -d "{\\"wallet_id\\":\\"$WALLET_ID\\"}"`}
           />
 
-          <ActionButton
+          <CliPanel
             label="Deactivate by controller signature (V3.1.1)"
-            description="Sovereign deactivation — anyone with the controller private key can deactivate this worker without admin or registrant auth."
-            disabled={!hasController}
-            disabledReason={
+            available={hasController}
+            unavailableReason={
               !hasController
-                ? "Worker has no controller_pubkey. Registered before V3.1.1, or the wizard didn't set one. Use admin or registrant predecessor auth instead."
+                ? "Worker has no controller_pubkey. Registered before the wizard's V3.1.1 patch — use admin/predecessor auth instead."
                 : undefined
             }
-            onClick={() => {
-              alert(
-                "V3.1.1 deactivate flow: sign canonical msg with controller key, submit to registry. Not implemented in this pass.",
-              );
-            }}
+            summary="Sovereign deactivation: any account holding the controller private key can deactivate without admin/registrant auth. For outlayer-managed workers, the controller key IS the TEE-held key — sign via outlayer's /wallet/v1/sign-message in raw mode, submit to the registry."
+            cli={`# Canonical message bytes the contract verifies:
+#   b"delibera.deactivate-worker.v1\\x00" || worker_did || b"\\x00" || nonce
+
+WORKER_DID="${worker.worker_did}"
+NONCE="$(date +%s)-${Math.random().toString(36).slice(2, 8)}"
+API_KEY=<your wk_...>
+OUTLAYER_HOST=https://testnet-api.outlayer.fastnear.com
+
+# Outlayer signs the message (format: raw)
+MESSAGE=$(printf 'delibera.deactivate-worker.v1\\x00%s\\x00%s' "$WORKER_DID" "$NONCE" | base64)
+SIG=$(curl -s -X POST $OUTLAYER_HOST/wallet/v1/sign-message \\
+  -H "Authorization: Bearer $API_KEY" \\
+  -H "Content-Type: application/json" \\
+  -d "{\\"message\\":\\"$MESSAGE\\",\\"recipient\\":\\"registry.agents-coordinator.testnet\\",\\"format\\":\\"raw\\"}" | jq -r .signature)
+
+# Submit to the registry (any account pays gas; sig is the auth)
+near contract call-function as-transaction registry.agents-coordinator.testnet \\
+  deactivate_worker_by_controller \\
+  json-args "{\\"worker_did\\":\\"$WORKER_DID\\",\\"nonce\\":\\"$NONCE\\",\\"signature\\":\\"$SIG\\"}" \\
+  prepaid-gas '50 Tgas' attached-deposit '0 NEAR' \\
+  sign-as <any-funded>.testnet network-config testnet sign-with-keychain send`}
           />
 
           <ActionButton
             label="Deactivate (legacy — predecessor auth)"
-            description="Standard deactivation. Requires the signing NEAR account to be either the original registrant or the contract admin."
+            description="Standard deactivation. Requires the signing NEAR account to be either the original registrant or the contract admin (agents-coordinator.testnet)."
             disabled={false}
             onClick={() => {
               window.location.href = `https://explorer.testnet.near.org/accounts/${REGISTRY_CONTRACT}`;
@@ -336,6 +380,51 @@ function ActionButton({
       <p className="mt-1 text-xs text-gray-600">{description}</p>
       {disabled && disabledReason && (
         <p className="mt-1 text-xs italic text-gray-500">{disabledReason}</p>
+      )}
+    </div>
+  );
+}
+
+interface CliPanelProps {
+  label: string;
+  available: boolean;
+  unavailableReason?: string;
+  summary: string;
+  cli: string;
+}
+
+function CliPanel({
+  label,
+  available,
+  unavailableReason,
+  summary,
+  cli,
+}: CliPanelProps) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div
+      className={
+        "rounded border p-3 " + (available ? "" : "opacity-60")
+      }
+    >
+      <div className="flex items-center justify-between gap-3">
+        <span className="font-medium">{label}</span>
+        <button
+          onClick={() => setOpen((o) => !o)}
+          disabled={!available}
+          className="rounded border px-3 py-1 text-xs disabled:opacity-40"
+        >
+          {!available ? "Unavailable" : open ? "Hide CLI" : "Show CLI"}
+        </button>
+      </div>
+      <p className="mt-1 text-xs text-gray-600">{summary}</p>
+      {!available && unavailableReason && (
+        <p className="mt-1 text-xs italic text-gray-500">{unavailableReason}</p>
+      )}
+      {available && open && (
+        <pre className="mt-3 max-h-80 overflow-auto rounded bg-gray-900 p-3 text-[10px] leading-relaxed text-gray-100">
+          {cli}
+        </pre>
       )}
     </div>
   );
