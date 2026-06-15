@@ -16,7 +16,7 @@
  *      by mirroring to Ensue under an x402/* key prefix.
  */
 
-import type { TallyResult } from '@near-shade-coordination/shared';
+import type { TallyResult } from '@delibera-xyz/shared';
 
 export type VerdictStatus = 'pending' | 'completed' | 'failed';
 

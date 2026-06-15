@@ -181,28 +181,35 @@ console.log('Contract ID:', process.env.AGENT_CONTRACT_ID || process.env.NEXT_PU
 console.log('Ensue API configured:', process.env.ENSUE_API_KEY ? 'YES' : 'NO');
 logX402Config();
 
-serve({ fetch: app.fetch, port }, async (info) => {
-  console.log(`\nCoordinator Agent HTTP server running at http://localhost:${info.port}`);
+// On Vercel (serverless), skip the long-running server bind + background loops.
+// The Vercel function entrypoint (api/[...path].ts) imports `app` directly.
+// Local Node still binds the port and runs the coordination loop as before.
+if (!process.env.VERCEL) {
+  serve({ fetch: app.fetch, port }, async (info) => {
+    console.log(`\nCoordinator Agent HTTP server running at http://localhost:${info.port}`);
 
-  if (LOCAL_MODE) {
-    console.log('\n[LOCAL MODE] Skipping TEE registration');
-    console.log('[LOCAL MODE] Starting local coordination loop (Ensue-only)...');
-    console.log('[LOCAL MODE] Use POST /api/coordinate/trigger to start a coordination\n');
-    startLocalCoordinationLoop();
+    if (LOCAL_MODE) {
+      console.log('\n[LOCAL MODE] Skipping TEE registration');
+      console.log('[LOCAL MODE] Starting local coordination loop (Ensue-only)...');
+      console.log('[LOCAL MODE] Use POST /api/coordinate/trigger to start a coordination\n');
+      startLocalCoordinationLoop();
 
-    // Register coordinator in registry (non-blocking)
-    ensureCoordinatorRegistered().catch(err =>
-      console.warn('[LOCAL MODE] Coordinator registry registration failed (non-fatal):', err)
-    );
-  } else if (SHADE_AGENT_CONFIGURED) {
-    // Initialize ShadeClient (v2 pattern from shade-agent-template 2.0)
-    // Run in background so the HTTP server stays responsive during init
-    initShadeAgent().catch((err) => {
-      console.error('ShadeClient initialization failed:', err);
-      console.error('Server will keep running but coordination will not work until agent is registered.');
-    });
-  } else {
-    console.warn('\n[DEGRADED] Missing ShadeClient config — server running for health checks only');
-    console.warn('[DEGRADED] Set AGENT_CONTRACT_ID, SPONSOR_ACCOUNT_ID, SPONSOR_PRIVATE_KEY to enable coordination');
-  }
-});
+      // Register coordinator in registry (non-blocking)
+      ensureCoordinatorRegistered().catch(err =>
+        console.warn('[LOCAL MODE] Coordinator registry registration failed (non-fatal):', err)
+      );
+    } else if (SHADE_AGENT_CONFIGURED) {
+      // Initialize ShadeClient (v2 pattern from shade-agent-template 2.0)
+      // Run in background so the HTTP server stays responsive during init
+      initShadeAgent().catch((err) => {
+        console.error('ShadeClient initialization failed:', err);
+        console.error('Server will keep running but coordination will not work until agent is registered.');
+      });
+    } else {
+      console.warn('\n[DEGRADED] Missing ShadeClient config — server running for health checks only');
+      console.warn('[DEGRADED] Set AGENT_CONTRACT_ID, SPONSOR_ACCOUNT_ID, SPONSOR_PRIVATE_KEY to enable coordination');
+    }
+  });
+}
+
+export default app;

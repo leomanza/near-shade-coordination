@@ -1,0 +1,59 @@
+# Vercel ignore — keeps upload small for coordinator-agent (and protocol-api) deploys.
+# Strategy: blacklist every top-level dir we DON'T need + standard build/local artifacts.
+
+# Top-level packages not needed by the coord-agent/protocol-api function bundle
+/contracts
+/coordinator-contract
+/factory-contract
+/registry-contract
+/docs
+/frontend
+/mcp-storage-server
+/worker-agent
+/worker-agent-1
+/worker-agent-2
+/worker-agent-3
+/x402-client
+/ensue-mcp-server
+/sandbox
+/scripts
+/doc
+/.claude
+/.cursor
+/.playwright-mcp
+
+# Build artifacts (Vercel re-runs install; workspace deps ship their own dist)
+node_modules
+.next
+.turbo
+.cache
+**/target
+**/coverage
+**/.vitest-cache
+**/*.tsbuildinfo
+coordinator-agent/dist
+protocol-api/dist
+
+# Local-dev / VCS / OS
+.git
+.DS_Store
+*.log
+.vercel
+**/.vercel
+
+# Secrets — Vercel injects env vars from project settings, never from files
+.env
+.env.local
+.env.development
+.env.development.local
+.env.production
+.env.test
+**/.env
+**/.env.local
+**/.env.development
+**/.env.development.local
+**/.env.production
+**/.env.test
+
+# Lockfile backups created during workspace migration
+**/package-lock.json.preworkspace

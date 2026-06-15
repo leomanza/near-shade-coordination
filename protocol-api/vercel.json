@@ -1,0 +1,13 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "functions": {
+    "api/[...path].ts": {
+      "maxDuration": 300,
+      "includeFiles": "node_modules/{@ucanto,@storacha,multiformats,@noble,@web3-storage,@ipld,uint8arrays}/**"
+    }
+  },
+  "rewrites": [
+    { "source": "/api/:path*", "destination": "/api/[...path]" }
+  ]
+}

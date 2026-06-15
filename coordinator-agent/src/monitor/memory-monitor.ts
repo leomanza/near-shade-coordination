@@ -663,13 +663,35 @@ async function processCoordination(
 async function triggerWorkers(taskConfig: string, workers: WorkerRecord[]): Promise<void> {
   console.log('\nTriggering workers...');
 
-  // Write task config to shared memory
+  // Write task config to shared memory — this is BOTH the activation payload for
+  // push workers (echoed inside the webhook body) and the polling key for pull
+  // workers (they read this directly from Ensue on their own cadence).
   await getEnsueClient().updateMemory(MEMORY_KEYS.CONFIG_TASK_DEFINITION, taskConfig);
 
-  // Reset all worker statuses to pending
+  // Reset all worker statuses to pending — applies to push AND polling workers
+  // so the dashboard reflects "task assigned, waiting for vote" for everyone.
   await Promise.all(
     workers.map(w => getEnsueClient().updateMemory(getWorkerKeys(w.worker_did).STATUS, 'pending'))
   );
+
+  // Polling workers (dispatch.type=ensue_polling) register with a non-http endpoint_url
+  // marker (e.g. "ensue://socialcap" or "polling://..."). They never receive a webhook;
+  // they read the task from Ensue on their own cadence. We skip HTTP dispatch for them
+  // entirely — the task-definition write above is the only signal they need.
+  // Doc: doc/plans/dispatch-modes/00-spec.md
+  const isPollingWorker = (w: WorkerRecord): boolean =>
+    !/^https?:\/\//i.test(w.endpoint_url ?? '');
+
+  const pollingWorkers = workers.filter(isPollingWorker);
+  if (pollingWorkers.length > 0) {
+    console.log(
+      `[polling] ${pollingWorkers.length} pull-mode worker(s) — task written to Ensue, ` +
+      `they'll pick it up on their next poll:`,
+    );
+    for (const w of pollingWorkers) {
+      console.log(`  ${w.worker_did} (endpoint=${w.endpoint_url || '<none>'})`);
+    }
+  }
 
   // Shared set — both LOCAL_MODE and ironclaw blocks add to this
   const unreachableWorkers: Set<string> = new Set();
@@ -681,6 +703,7 @@ async function triggerWorkers(taskConfig: string, workers: WorkerRecord[]): Prom
     await Promise.all(
       workers
         .filter(w => !(w.cvm_id?.startsWith('ironclaw-') ?? false)) // IronClaw handled below; null/undefined cvm_id → not IronClaw
+        .filter(w => !isPollingWorker(w))                            // polling workers self-activate via Ensue, no HTTP dispatch
         .map(async (w) => {
           try {
             const res = await fetch(`${w.endpoint_url}/api/task/execute`, {
@@ -700,8 +723,11 @@ async function triggerWorkers(taskConfig: string, workers: WorkerRecord[]): Prom
     );
   }
 
-  // IronClaw workers: dispatch via /webhook (works in LOCAL_MODE and production)
-  const ironclawWorkers = workers.filter(w => w.cvm_id?.startsWith('ironclaw-') ?? false);
+  // IronClaw workers: dispatch via /webhook (works in LOCAL_MODE and production).
+  // Polling workers are excluded — they self-activate by reading Ensue.
+  const ironclawWorkers = workers.filter(w =>
+    (w.cvm_id?.startsWith('ironclaw-') ?? false) && !isPollingWorker(w),
+  );
   if (ironclawWorkers.length > 0) {
     const parsed = (() => { try { return JSON.parse(taskConfig); } catch { return {}; } })() as Record<string, unknown>;
     const taskId = (parsed.taskId as string | undefined) ?? crypto.randomUUID();

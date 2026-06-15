@@ -28,8 +28,14 @@ app.route('/api/workers', workersRoute);
 app.route('/api/payments', paymentsRoute);
 
 const port = Number(process.env.PORT || '3005');
-console.log('Protocol API starting on port', port);
 
-serve({ fetch: app.fetch, port }, () => {
-  console.log(`Protocol API running at http://localhost:${port}`);
-});
+// On Vercel (serverless), skip the long-running server bind.
+// The Vercel function entrypoint (api/[...path].ts) imports `app` directly.
+if (!process.env.VERCEL) {
+  console.log('Protocol API starting on port', port);
+  serve({ fetch: app.fetch, port }, () => {
+    console.log(`Protocol API running at http://localhost:${port}`);
+  });
+}
+
+export default app;

@@ -1,10 +1,14 @@
 use near_sdk::{
     env, near, require,
-    store::IterableMap,
+    store::{IterableMap, IterableSet},
     AccountId, BorshStorageKey, NearToken, PanicOnDefault,
 };
 
 const DEFAULT_MIN_DEPOSIT: NearToken = NearToken::from_millinear(100); // 0.1 NEAR
+
+/// Domain-separated prefix for the deactivate-worker-by-controller signature.
+/// Any change here is a breaking signature-format change — bump the version.
+const DEACTIVATE_DOMAIN: &[u8] = b"delibera.deactivate-worker.v1\x00";
 
 #[derive(BorshStorageKey)]
 #[near]
@@ -13,8 +17,12 @@ pub enum StorageKey {
     _DeprecatedWorkers,      // ordinal 1 — V1 format (dead)
     _DeprecatedCoordinatorsV2, // ordinal 2 — V2 format (dead)
     _DeprecatedWorkersV2,    // ordinal 3 — V2 format (dead)
-    WorkersByDid,            // ordinal 4 — V3 primary index
-    CoordinatorsByDid,       // ordinal 5 — V3 primary index
+    _DeprecatedWorkersByDidV3, // ordinal 4 — V3 (stale storage from pre-V3.1 deploys)
+    _DeprecatedCoordinatorsByDidV3, // ordinal 5 — V3 (stale storage from pre-V3.1 deploys)
+    _DeprecatedUsedControllerNoncesV31, // ordinal 6 — V3.1 first cut (stale)
+    WorkersByDid,                  // ordinal 7 — V3.1.1 primary index (fresh storage)
+    CoordinatorsByDid,             // ordinal 8 — V3.1.1 primary index (fresh storage)
+    UsedControllerNonces,          // ordinal 9 — V3.1.1 replay protection (fresh storage)
 }
 
 /// A registered worker agent, keyed by `worker_did`.
@@ -32,6 +40,12 @@ pub struct WorkerRecord {
     pub cvm_id: String,
     pub registered_at: u64,
     pub is_active: bool,
+    /// Raw 32-byte ed25519 public key that controls deactivation independent
+    /// of `account_id`. When `Some`, anyone can deactivate the worker by
+    /// supplying a valid ed25519 signature over the canonical challenge.
+    /// `None` for backward compat with pre-migration registrations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub controller_pubkey: Option<[u8; 32]>,
 }
 
 /// A registered coordinator, keyed by `coordinator_did`
@@ -56,6 +70,11 @@ pub struct RegistryContract {
     pub coordinators_by_did: IterableMap<String, CoordinatorRecord>,
     pub min_deposit: NearToken,
     pub next_worker_seq: u64,
+    /// sha256(worker_did || \0 || nonce) base58-encoded. Spent nonces are
+    /// recorded here to prevent replay of captured deactivate-by-controller
+    /// signatures. Initialized empty on migration — pre-V3.1 records that
+    /// never used this path are unaffected.
+    pub used_controller_nonces: IterableSet<String>,
 }
 
 #[near]
@@ -69,6 +88,7 @@ impl RegistryContract {
             coordinators_by_did: IterableMap::new(StorageKey::CoordinatorsByDid),
             min_deposit: DEFAULT_MIN_DEPOSIT,
             next_worker_seq: 0,
+            used_controller_nonces: IterableSet::new(StorageKey::UsedControllerNonces),
         }
     }
 
@@ -84,8 +104,19 @@ impl RegistryContract {
             coordinators_by_did: IterableMap::new(StorageKey::CoordinatorsByDid),
             min_deposit: DEFAULT_MIN_DEPOSIT,
             next_worker_seq: 0,
+            used_controller_nonces: IterableSet::new(StorageKey::UsedControllerNonces),
         }
     }
+
+    // V3 → V3.1 migration note: this release adds the optional
+    // `controller_pubkey: Option<[u8; 32]>` field to WorkerRecord (borsh
+    // schema change at the end of the struct) plus the new
+    // `used_controller_nonces: IterableSet<String>` storage map. Existing
+    // V3 records cannot be parsed as V3.1 records, so deploys must call
+    // `force_reinitialize` and re-register existing workers/coordinators
+    // (we maintain the registration list off-chain). A non-destructive
+    // migration is tracked separately if/when the active-record count
+    // grows past what's reasonable to re-register manually.
 
     // ========== COORDINATOR REGISTRATION ==========
 
@@ -148,12 +179,39 @@ impl RegistryContract {
     /// Workers are first-class entities — no `coordinator_did` argument.
     /// Coordinators discover workers via `list_active_workers()` and dispatch
     /// off-chain (HMAC-signed webhook with a pre-shared per-worker secret).
+    ///
     #[payable]
     pub fn register_worker(
         &mut self,
         worker_did: String,
         endpoint_url: String,
         cvm_id: String,
+    ) -> WorkerRecord {
+        self.register_worker_inner(worker_did, endpoint_url, cvm_id, None)
+    }
+
+    /// V3.1 variant: also binds a controller pubkey so the worker — not the
+    /// `account_id` of the payer — can later deactivate via
+    /// `deactivate_worker_by_controller`. `controller_pubkey` is the
+    /// base58-encoded 32-byte ed25519 public key.
+    #[payable]
+    pub fn register_worker_with_controller(
+        &mut self,
+        worker_did: String,
+        endpoint_url: String,
+        cvm_id: String,
+        controller_pubkey: String,
+    ) -> WorkerRecord {
+        let bytes = Self::decode_pubkey_or_panic(&controller_pubkey);
+        self.register_worker_inner(worker_did, endpoint_url, cvm_id, Some(bytes))
+    }
+
+    fn register_worker_inner(
+        &mut self,
+        worker_did: String,
+        endpoint_url: String,
+        cvm_id: String,
+        controller_pubkey: Option<[u8; 32]>,
     ) -> WorkerRecord {
         let deposit = env::attached_deposit();
         require!(
@@ -182,6 +240,7 @@ impl RegistryContract {
             cvm_id,
             registered_at: env::block_timestamp(),
             is_active: true,
+            controller_pubkey,
         };
 
         self.workers_by_did
@@ -207,7 +266,12 @@ impl RegistryContract {
         env::log_str(&format!("Updated endpoint for worker: {}", worker_did));
     }
 
-    /// Deactivate a worker (only the worker's account_id or admin)
+    /// Deactivate a worker (only the worker's account_id or admin).
+    ///
+    /// For workers registered with a `controller_pubkey`, the off-chain
+    /// controller path via [`deactivate_worker_by_controller`] is also
+    /// available — it doesn't require the predecessor to match the
+    /// registrant.
     pub fn deactivate_worker(&mut self, worker_did: String) {
         let entry = self
             .workers_by_did
@@ -220,6 +284,100 @@ impl RegistryContract {
         );
         entry.is_active = false;
         env::log_str(&format!("Deactivated worker: {}", worker_did));
+    }
+
+    /// Deactivate a worker by presenting an ed25519 signature from its
+    /// registered `controller_pubkey` (V3.1+). The predecessor does NOT need
+    /// to match `account_id` — any caller paying gas can submit.
+    ///
+    /// Signature scheme:
+    ///   message = b"delibera.deactivate-worker.v1\x00"
+    ///              || worker_did_bytes || b"\x00" || nonce_bytes
+    ///   ed25519_verify(signature, message, controller_pubkey) == true
+    ///
+    /// `nonce` is any caller-chosen string (recommended: 16+ random bytes
+    /// hex/base58-encoded). The contract records `(worker_did, nonce)` pairs
+    /// to reject replays.
+    pub fn deactivate_worker_by_controller(
+        &mut self,
+        worker_did: String,
+        nonce: String,
+        signature: String,
+    ) {
+        require!(!nonce.is_empty(), "nonce must not be empty");
+
+        // Fetch + capture controller pubkey before mutating
+        let controller_pubkey = self
+            .workers_by_did
+            .get(&worker_did)
+            .expect("Worker not found")
+            .controller_pubkey
+            .unwrap_or_else(|| {
+                env::panic_str(
+                    "Worker has no controller_pubkey — use deactivate_worker (predecessor auth) instead",
+                )
+            });
+
+        // Replay protection — derive a collision-free key from (worker_did, nonce)
+        let nonce_key = Self::nonce_storage_key(&worker_did, &nonce);
+        require!(
+            !self.used_controller_nonces.contains(&nonce_key),
+            "Nonce already used for this worker"
+        );
+
+        // Decode signature
+        let sig_bytes = near_sdk::bs58::decode(&signature)
+            .into_vec()
+            .unwrap_or_else(|_| env::panic_str("signature is not valid base58"));
+        require!(sig_bytes.len() == 64, "signature must decode to 64 bytes");
+        let mut sig_arr = [0u8; 64];
+        sig_arr.copy_from_slice(&sig_bytes);
+
+        // Build canonical message
+        let mut msg =
+            Vec::with_capacity(DEACTIVATE_DOMAIN.len() + worker_did.len() + 1 + nonce.len());
+        msg.extend_from_slice(DEACTIVATE_DOMAIN);
+        msg.extend_from_slice(worker_did.as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(nonce.as_bytes());
+
+        require!(
+            env::ed25519_verify(&sig_arr, &msg, &controller_pubkey),
+            "ed25519 signature verification failed"
+        );
+
+        // Spend nonce + flip is_active
+        self.used_controller_nonces.insert(nonce_key);
+        let entry = self.workers_by_did.get_mut(&worker_did).unwrap();
+        entry.is_active = false;
+        env::log_str(&format!(
+            "Deactivated worker via controller signature: {}",
+            worker_did
+        ));
+    }
+
+    // --- internal helpers ---
+
+    fn decode_pubkey_or_panic(s: &str) -> [u8; 32] {
+        let bytes = near_sdk::bs58::decode(s)
+            .into_vec()
+            .unwrap_or_else(|_| env::panic_str("controller_pubkey is not valid base58"));
+        require!(
+            bytes.len() == 32,
+            "controller_pubkey must decode to 32 bytes"
+        );
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        arr
+    }
+
+    fn nonce_storage_key(worker_did: &str, nonce: &str) -> String {
+        let mut buf = Vec::with_capacity(worker_did.len() + 1 + nonce.len());
+        buf.extend_from_slice(worker_did.as_bytes());
+        buf.push(0);
+        buf.extend_from_slice(nonce.as_bytes());
+        let digest = env::sha256_array(&buf);
+        near_sdk::bs58::encode(digest).into_string()
     }
 
     /// Deactivate a coordinator (only the coordinator's account_id or admin)
@@ -326,6 +484,19 @@ mod tests {
     const WORKER_DID: &str = "did:key:z6MkWorker1";
     const WORKER_DID_2: &str = "did:key:z6MkWorker2";
 
+    // Test fixtures — regenerate with `node scripts/gen-test-keypair.mjs`
+    // if you change the controller signing-message constants.
+    const CONTROLLER_WORKER_DID: &str = "did:key:z6MkController1";
+    const TEST_CONTROLLER_PUBKEY_B58: &str = "9ShWVwMmNp4EJPz8beiKuxKYGzPN2aGdxcXiUKqjpp7H";
+    const TEST_NONCE_1: &str = "nonce-1";
+    const TEST_NONCE_2: &str = "nonce-2";
+    const TEST_SIG_NONCE_1_B58: &str =
+        "WcdMZrmRp4nhBDzWSHTux54DcpVyPSQBhnsMrnyatDVHSrfBQqHP9oNk9e3WWZdpMPeNAz6HD8qYcZ5h8sV7yRF";
+    const TEST_SIG_NONCE_2_B58: &str =
+        "37M2DJMUgWSEituMCXZx7QTVCoVWFkCqeY7L3PyAGU88zzy5SQp8cyMj5pJZak5xgNghM6jHQiDECTv8y6Eagjaa";
+    const TEST_SIG_FROM_OTHER_KEY_B58: &str =
+        "v46qcfdv1ZivnTm26YRcXzgVGJccwZzrhEckgDGq5BgBGX9y5QeqwpnNQMZ54uTjgvFiS9JfU9SF2iccCaeseX8";
+
     fn get_context(predecessor: AccountId) -> VMContextBuilder {
         let mut builder = VMContextBuilder::new();
         builder
@@ -356,6 +527,15 @@ mod tests {
             WORKER_DID.to_string(),
             "https://worker1.example.com".to_string(),
             "cvm-worker-1".to_string(),
+        )
+    }
+
+    fn register_test_worker_with_controller(contract: &mut RegistryContract) -> WorkerRecord {
+        contract.register_worker_with_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            "https://controller-worker.example.com".to_string(),
+            "cvm-ctrl-1".to_string(),
+            TEST_CONTROLLER_PUBKEY_B58.to_string(),
         )
     }
 
@@ -699,5 +879,225 @@ mod tests {
         let stats = contract.get_stats();
         assert_eq!(stats["total_workers"], 1);
         assert_eq!(stats["active_workers"], 0);
+    }
+
+    // ========== V3.1: CONTROLLER-PUBKEY DEACTIVATION ==========
+
+    /// Switch the predecessor for the next contract call. Useful for asserting
+    /// that the controller-deactivation path works from ANY predecessor.
+    fn become_caller(caller: AccountId) {
+        let mut b = VMContextBuilder::new();
+        b.predecessor_account_id(caller.clone())
+            .signer_account_id(caller)
+            .attached_deposit(NearToken::from_yoctonear(0));
+        testing_env!(b.build());
+    }
+
+    #[test]
+    fn test_register_worker_without_controller_pubkey_backward_compat() {
+        // The default helper passes None; the resulting record has
+        // controller_pubkey: None, matching pre-V3.1 behavior.
+        let mut contract = setup_contract();
+        let record = register_test_worker(&mut contract);
+        assert!(record.controller_pubkey.is_none());
+    }
+
+    #[test]
+    fn test_register_worker_with_valid_controller_pubkey_stores_bytes() {
+        let mut contract = setup_contract();
+        let record = register_test_worker_with_controller(&mut contract);
+        assert!(record.controller_pubkey.is_some());
+        let bytes = record.controller_pubkey.unwrap();
+        // The bytes should round-trip back to the input base58
+        let encoded = near_sdk::bs58::encode(bytes).into_string();
+        assert_eq!(encoded, TEST_CONTROLLER_PUBKEY_B58);
+    }
+
+    #[test]
+    #[should_panic(expected = "controller_pubkey is not valid base58")]
+    fn test_register_worker_invalid_controller_pubkey_not_base58() {
+        let mut contract = setup_contract();
+        contract.register_worker_with_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            "https://w.example.com".to_string(),
+            "cvm-c-1".to_string(),
+            // '0' and 'I' are invalid base58 characters
+            "0OIl_NOT_BASE58_AT_ALL_!@#".to_string(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "controller_pubkey must decode to 32 bytes")]
+    fn test_register_worker_invalid_controller_pubkey_wrong_length() {
+        let mut contract = setup_contract();
+        // Valid base58 but only ~5 bytes when decoded ("hello")
+        contract.register_worker_with_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            "https://w.example.com".to_string(),
+            "cvm-c-1".to_string(),
+            near_sdk::bs58::encode(b"hello").into_string(),
+        );
+    }
+
+    #[test]
+    fn test_existing_deactivate_worker_path_unchanged_for_controller_worker() {
+        // A worker with controller_pubkey set can still be deactivated via the
+        // legacy predecessor-auth path — the new field is additive.
+        let mut contract = setup_contract();
+        register_test_worker_with_controller(&mut contract);
+
+        contract.deactivate_worker(CONTROLLER_WORKER_DID.to_string());
+        let w = contract
+            .get_worker_by_did(CONTROLLER_WORKER_DID.to_string())
+            .unwrap();
+        assert!(!w.is_active);
+    }
+
+    #[test]
+    fn test_deactivate_worker_by_controller_success_from_arbitrary_predecessor() {
+        let mut contract = setup_contract();
+        register_test_worker_with_controller(&mut contract);
+
+        // Caller is a completely unrelated account — this is the whole point.
+        become_caller(accounts(2));
+
+        contract.deactivate_worker_by_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            TEST_NONCE_1.to_string(),
+            TEST_SIG_NONCE_1_B58.to_string(),
+        );
+
+        let w = contract
+            .get_worker_by_did(CONTROLLER_WORKER_DID.to_string())
+            .unwrap();
+        assert!(!w.is_active);
+        // controller_pubkey should be preserved
+        assert!(w.controller_pubkey.is_some());
+    }
+
+    #[test]
+    #[should_panic(expected = "ed25519 signature verification failed")]
+    fn test_deactivate_worker_by_controller_wrong_signature() {
+        let mut contract = setup_contract();
+        register_test_worker_with_controller(&mut contract);
+        // Signature signed by a different key, over the same canonical msg
+        contract.deactivate_worker_by_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            TEST_NONCE_1.to_string(),
+            TEST_SIG_FROM_OTHER_KEY_B58.to_string(),
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Nonce already used for this worker")]
+    fn test_deactivate_worker_by_controller_replay_rejected() {
+        let mut contract = setup_contract();
+        register_test_worker_with_controller(&mut contract);
+        // First use spends the nonce
+        contract.deactivate_worker_by_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            TEST_NONCE_1.to_string(),
+            TEST_SIG_NONCE_1_B58.to_string(),
+        );
+        // Re-using same (did, nonce) — replay
+        contract.deactivate_worker_by_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            TEST_NONCE_1.to_string(),
+            TEST_SIG_NONCE_1_B58.to_string(),
+        );
+    }
+
+    #[test]
+    fn test_deactivate_worker_by_controller_fresh_nonce_works_after_first() {
+        // Sanity: it's the (did, nonce) PAIR that's spent, not just the nonce.
+        // After spending nonce-1, nonce-2 with a valid sig should still work.
+        let mut contract = setup_contract();
+        register_test_worker_with_controller(&mut contract);
+        contract.deactivate_worker_by_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            TEST_NONCE_1.to_string(),
+            TEST_SIG_NONCE_1_B58.to_string(),
+        );
+        // Worker is now inactive. Re-activate via legacy upsert is out of scope
+        // for this test; we just confirm a fresh-nonce call doesn't get
+        // replay-blocked. (Calling deactivate on already-inactive worker is
+        // intentionally allowed — idempotent.)
+        contract.deactivate_worker_by_controller(
+            CONTROLLER_WORKER_DID.to_string(),
+            TEST_NONCE_2.to_string(),
+            TEST_SIG_NONCE_2_B58.to_string(),
+        );
+        let w = contract
+            .get_worker_by_did(CONTROLLER_WORKER_DID.to_string())
+            .unwrap();
+        assert!(!w.is_active);
+    }
+
+    #[test]
+    #[should_panic(expected = "Worker has no controller_pubkey")]
+    fn test_deactivate_worker_by_controller_no_pubkey_set() {
+        // A pre-V3.1-style worker (no controller_pubkey) cannot be deactivated
+        // via the controller path — only the legacy predecessor path.
+        let mut contract = setup_contract();
+        register_test_worker(&mut contract);
+        contract.deactivate_worker_by_controller(
+            WORKER_DID.to_string(),
+            TEST_NONCE_1.to_string(),
+            TEST_SIG_NONCE_1_B58.to_string(),
+        );
+    }
+
+    #[test]
+    fn test_serialization_omits_controller_pubkey_when_none() {
+        // The #[serde(skip_serializing_if = "Option::is_none")] attribute
+        // means JSON output for a no-controller-pubkey worker doesn't include
+        // the field at all. JS callers that don't know about V3.1 see the
+        // same shape they did before.
+        let mut contract = setup_contract();
+        register_test_worker(&mut contract);
+        let w = contract.get_worker_by_did(WORKER_DID.to_string()).unwrap();
+        let json = serde_json::to_value(&w).unwrap();
+        assert!(json.get("controller_pubkey").is_none(), "controller_pubkey should be skipped, got: {}", json);
+
+        // For a V3.1 worker WITH controller_pubkey, the field IS in the JSON
+        register_test_worker_with_controller(&mut contract);
+        let w = contract
+            .get_worker_by_did(CONTROLLER_WORKER_DID.to_string())
+            .unwrap();
+        let json = serde_json::to_value(&w).unwrap();
+        assert!(json.get("controller_pubkey").is_some());
+    }
+}
+
+#[cfg(test)]
+mod borsh_compat_tests {
+    use borsh::{BorshDeserialize, BorshSerialize};
+
+    #[derive(BorshSerialize, BorshDeserialize)]
+    struct OldShape { s: String, n: u64, b: bool }
+
+    #[derive(BorshSerialize, BorshDeserialize, Debug)]
+    struct NewShape { s: String, n: u64, b: bool, new_field: Option<[u8; 32]> }
+
+    /// Empirical confirmation that deploying V3.1 over V3 IS destructive:
+    /// borsh does not default `Option<T>` to None on EOF — adding a new
+    /// optional field to the end of a struct breaks deserialization of
+    /// existing rows. Recorded here so future contributors don't re-derive
+    /// the same conclusion. Asserts the FAILURE shape we measured on
+    /// borsh 1.5: `Custom { kind: InvalidData, error: "Unexpected length of input" }`.
+    #[test]
+    fn v3_v31_borsh_compat_is_destructive() {
+        let old = OldShape { s: "did:key:test".to_string(), n: 42, b: true };
+        let bytes = borsh::to_vec(&old).unwrap();
+        let parsed = NewShape::try_from_slice(&bytes);
+        assert!(
+            parsed.is_err(),
+            "borsh changed behavior — V3 → V3.1 might now be non-destructive, revisit the migration plan"
+        );
+        let err = parsed.unwrap_err().to_string();
+        assert!(
+            err.contains("Unexpected length of input"),
+            "unexpected borsh error shape: {err}"
+        );
     }
 }

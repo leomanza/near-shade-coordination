@@ -81,6 +81,18 @@ const phalaWorker = {
   is_active: true,
 };
 
+// dispatch.type=ensue_polling — outbound-only runtime. Identified by a non-http
+// endpoint_url marker. The dispatcher must NOT HTTP-probe this worker.
+// See doc/plans/dispatch-modes/00-spec.md
+const pollingWorker = {
+  account_id: 'w3.testnet',
+  worker_did: 'did:key:z6MkHostedPolling',
+  endpoint_url: 'ensue://socialcap',
+  cvm_id: 'ironclaw-hosted-nearai-1',
+  registered_at: 0,
+  is_active: true,
+};
+
 describe('triggerWorkers — ironclaw dispatch branch', () => {
   beforeEach(() => { mockFetch.mockClear(); });
   afterEach(() => { vi.clearAllMocks(); });
@@ -122,6 +134,28 @@ describe('triggerWorkers — ironclaw dispatch branch', () => {
     await triggerWorkersForTest('{}', [ironclawWorker]);
     const taskCall = mockFetch.mock.calls.find(c => String(c[0]).includes('/api/task/execute'));
     expect(taskCall).toBeUndefined();
+  });
+
+  it('polling worker (ensue:// endpoint) is NEVER HTTP-dispatched', async () => {
+    // The polling worker has a non-http endpoint marker. Coord-agent must
+    // skip both /webhook and /api/task/execute dispatch — its activation
+    // signal is the task definition write to Ensue, not an HTTP push.
+    await triggerWorkersForTest('{}', [pollingWorker]);
+    const webhookCall = mockFetch.mock.calls.find(c => String(c[0]).includes('/webhook'));
+    const taskCall = mockFetch.mock.calls.find(c => String(c[0]).includes('/api/task/execute'));
+    expect(webhookCall).toBeUndefined();
+    expect(taskCall).toBeUndefined();
+    // No HTTP calls at all should have happened for a pure-polling-worker set.
+    expect(mockFetch.mock.calls).toHaveLength(0);
+  });
+
+  it('mixed-mode dispatch: ironclaw pushed, polling worker untouched', async () => {
+    mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ message_id: 'm1' }) });
+    await triggerWorkersForTest('{}', [ironclawWorker, pollingWorker]);
+    // IronClaw webhook called exactly once; polling worker contributes no HTTP traffic.
+    const webhookCalls = mockFetch.mock.calls.filter(c => String(c[0]).includes('/webhook'));
+    expect(webhookCalls).toHaveLength(1);
+    expect(webhookCalls[0][0]).toBe('http://1.2.3.4:8080/webhook');
   });
 
   it('still calls webhook even when fetch will reject (dispatch is attempted)', async () => {

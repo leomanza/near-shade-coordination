@@ -1,0 +1,19 @@
+{
+  "name": "delibera-monorepo",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Delibera — AI governance protocol on NEAR (monorepo root). Each package in workspaces[] is independently deployable.",
+  "workspaces": [
+    "coordinator-agent",
+    "protocol-api",
+    "ensue-client",
+    "shared"
+  ],
+  "scripts": {
+    "build:shared": "npm -w @delibera-xyz/shared run build",
+    "build:ensue-client": "npm -w @delibera-xyz/ensue-client run build"
+  },
+  "dependencies": {
+    "vercel": "^54.6.1"
+  }
+}

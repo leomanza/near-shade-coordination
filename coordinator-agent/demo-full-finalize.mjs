@@ -65,7 +65,19 @@ async function nearView(contract, method, args = {}) {
 }
 
 const workers = await nearView(REGISTRY_CONTRACT, 'list_active_workers', {});
-const demoWorkers = workers.filter(w => w.cvm_id?.startsWith('ironclaw-demo-'));
+// Default filter: push workers (ironclaw-demo-*) AND polling workers
+// (external-polling) — mixed-mode finalization. F35 polling proxy is now
+// SHIPPED + verified in prod (2026-05-30), so polling workers vote via
+// POST /api/coordinate/poll/vote/:did and finalize alongside push workers.
+// WORKER_FILTER env var overrides the default for single-worker testing
+// (accepts exact worker_did, exact cvm_id, or cvm_id prefix).
+const WORKER_FILTER = process.env.WORKER_FILTER;
+const demoWorkers = workers.filter(w => {
+  if (WORKER_FILTER) {
+    return w.worker_did === WORKER_FILTER || w.cvm_id === WORKER_FILTER || (w.cvm_id?.startsWith(WORKER_FILTER) ?? false);
+  }
+  return (w.cvm_id?.startsWith('ironclaw-demo-') ?? false) || w.cvm_id === 'external-polling';
+});
 console.log(`Active demo workers: ${demoWorkers.length}`);
 for (const w of demoWorkers) console.log(`  ${w.cvm_id} (${w.worker_did})`);
 
@@ -206,8 +218,15 @@ console.log(`✓ coordinator_resume called at +${Date.now() - t0}ms`);
 console.log('\n--- waiting for start_coordination tx to finalize after yield resume ---');
 await scPromise;
 
-// 11. Verify on-chain Finalized state
-const final = await nearView(COORDINATOR_CONTRACT, 'get_proposal', { proposal_id: proposalId });
+// 11. Verify on-chain Finalized state — retry to absorb FastNEAR finality
+// propagation lag. The yield-resume receipt may land before the read replica
+// reflects the new state; ~1s is usually enough, give it up to 6s of retries.
+let final;
+for (let i = 0; i < 6; i++) {
+  final = await nearView(COORDINATOR_CONTRACT, 'get_proposal', { proposal_id: proposalId });
+  if (final.state === 'Finalized') break;
+  if (i < 5) await new Promise(r => setTimeout(r, 1000));
+}
 console.log(`\nFinal state: ${final.state}`);
 console.log(`Finalized result: ${final.finalized_result}`);
 console.log(`Total elapsed: ${Date.now() - t0}ms`);
@@ -216,6 +235,6 @@ if (final.state === 'Finalized') {
   console.log('\n🎯 LIVE FINALIZATION SUCCESS');
   process.exit(0);
 } else {
-  console.error('\n❌ Did not reach Finalized state');
+  console.error('\n❌ Did not reach Finalized state after 6s of retries — check explorer for actual state');
   process.exit(1);
 }

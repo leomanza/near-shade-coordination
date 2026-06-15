@@ -1,0 +1,3 @@
+# Intentionally empty — Vercel expects a public/ output directory even for
+# Functions-only deployments. Static assets (if any) go here. The Vercel
+# Functions are bundled separately from api/[...path].ts.

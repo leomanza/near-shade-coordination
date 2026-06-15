@@ -23,25 +23,42 @@ const VALIDATION_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const validationCache = new Map<string, { valid: boolean; checkedAt: number }>();
 
 /**
- * Probe a worker endpoint and verify its reported DID matches the registry.
- * Returns true only if the worker responds within 5s and its workerDid matches.
+ * Probe a worker endpoint for liveness, opportunistically verifying DID match.
+ *
+ * Liveness is "host:port is reachable" — any HTTP response < 500 within 5s counts,
+ * because some agent runtimes (e.g. IronClaw) don't expose a root handler and
+ * respond with 404 at `/`. We only reject DID mismatches when the worker
+ * actually returns a JSON body with a `workerDid` field.
+ *
+ * For polling workers (non-http endpoint_url, e.g. "ensue://..." marker), HTTP
+ * probes are nonsensical — they have no inbound surface to probe. We pass them
+ * through as valid; their liveness signal is their last Ensue write, surfaced
+ * separately via `ensue_status` in the workers route.
+ * See doc/plans/dispatch-modes/00-spec.md for the polling-mode rationale.
  */
 async function validateWorker(worker: { worker_did: string; endpoint_url: string }): Promise<boolean> {
+  if (!/^https?:\/\//i.test(worker.endpoint_url ?? '')) {
+    console.log(`[worker-validation] ${worker.worker_did} PASS (polling-mode, no HTTP probe)`);
+    return true;
+  }
   try {
     const res = await fetch(`${worker.endpoint_url}/`, {
       signal: AbortSignal.timeout(5000),
     });
-    if (!res.ok) {
+    if (res.status >= 500) {
       console.log(`[worker-validation] ${worker.worker_did} FAIL (HTTP ${res.status})`);
       return false;
     }
-    const body = await res.json() as { workerDid?: string };
-    if (body.workerDid === worker.worker_did) {
-      console.log(`[worker-validation] ${worker.worker_did} PASS`);
-      return true;
+    if (res.ok) {
+      try {
+        const body = await res.json() as { workerDid?: string };
+        if (body.workerDid && body.workerDid !== worker.worker_did) {
+          console.log(`[worker-validation] ${worker.worker_did} FAIL (DID mismatch: got ${body.workerDid})`);
+          return false;
+        }
+      } catch { /* non-JSON / no body — liveness only */ }
     }
-    console.log(`[worker-validation] ${worker.worker_did} FAIL (DID mismatch: got ${body.workerDid})`);
-    return false;
+    return true;
   } catch (err) {
     const reason = err instanceof Error ? err.message : 'unknown error';
     console.log(`[worker-validation] ${worker.worker_did} FAIL (${reason})`);
@@ -699,6 +716,134 @@ app.post('/verify-jury', async (c) => {
       500
     );
   }
+});
+
+// ─── Polling-mode proxy endpoints ────────────────────────────────────────
+// Lets sandboxed / outbound-only agents (NEAR AI hosted IronClaw, browser,
+// mobile, restricted serverless) participate in deliberation WITHOUT holding
+// Ensue credentials themselves. The coord-agent reads/writes Ensue with its
+// own key; the worker authenticates only by being registered + active in the
+// on-chain registry contract.
+//
+// v1 trust model (demo-grade): any registered active worker DID can submit a
+// vote — no per-message signature required. Risk: anyone who knows the DID
+// could spoof a vote for it. Acceptable for the protocol's bootstrap phase.
+// v2 trust model (production, post attested-signing): worker signs the vote
+// body with the ed25519 key matching its registered DID; coord-agent verifies
+// against the on-chain pubkey before writing.
+//
+// Spec: doc/plans/dispatch-modes/02-results.md F35
+// Verification context: doc/plans/skill-testing/05-verification-and-revised-questions.md
+
+/**
+ * GET /api/coordinate/poll/task
+ *
+ * Returns the active task_definition for keyless polling workers. Public read
+ * (the task is already replicated on-chain via the proposal; no secret in it).
+ * Polling workers call this on their own cadence (default 30s per skill spec).
+ *
+ * Returns: { task: string | null, timestamp: ISO8601 }
+ */
+app.get('/poll/task', async (c) => {
+  try {
+    const task = await getEnsueClient().readMemory(MEMORY_KEYS.CONFIG_TASK_DEFINITION);
+    return c.json({
+      task: task ?? null,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    return c.json(
+      {
+        error: 'Failed to read task_definition from Ensue',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      },
+      502,
+    );
+  }
+});
+
+/**
+ * POST /api/coordinate/poll/vote/:worker_did
+ * Body:  { "option": "...", "rationale"?: "..." }
+ *
+ * Accepts a vote on behalf of a registered worker. The coord-agent writes it
+ * to Ensue at coordination/tasks/{worker_did}/result using its own Ensue key.
+ * Authenticates by checking worker_did is currently active in the registry.
+ *
+ * Returns 200: { status: 'ok', worker_did, key, timestamp }
+ * Returns 400: malformed input
+ * Returns 403: worker_did not registered or not active
+ * Returns 502: upstream (registry or Ensue) failure
+ */
+app.post('/poll/vote/:worker_did', async (c) => {
+  const workerDid = decodeURIComponent(c.req.param('worker_did'));
+  if (!workerDid.startsWith('did:')) {
+    return c.json({ error: 'worker_did must start with "did:"' }, 400);
+  }
+
+  let body: { option?: unknown; rationale?: unknown };
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: 'request body must be JSON' }, 400);
+  }
+  if (!body.option || typeof body.option !== 'string') {
+    return c.json({ error: '"option" is required (string)' }, 400);
+  }
+  if (body.rationale != null && typeof body.rationale !== 'string') {
+    return c.json({ error: '"rationale" must be a string if present' }, 400);
+  }
+
+  // Trust model v1: verify worker_did is in the registry's active workers.
+  // Any matching active worker can submit a vote (no signature yet).
+  try {
+    const { localViewRegistry } = await import('../contract/local-contract');
+    const workers = await localViewRegistry<Array<{ worker_did: string; is_active: boolean }>>(
+      'list_active_workers',
+      {},
+    );
+    const found = (workers ?? []).find(w => w.worker_did === workerDid && w.is_active);
+    if (!found) {
+      return c.json(
+        { error: `worker_did not registered or not active in registry: ${workerDid}` },
+        403,
+      );
+    }
+  } catch (e) {
+    return c.json(
+      {
+        error: 'Failed to verify worker_did against registry contract',
+        details: e instanceof Error ? e.message : 'Unknown error',
+      },
+      502,
+    );
+  }
+
+  // Write the vote — same key shape as push-mode workers write directly.
+  const voteValue = JSON.stringify({
+    option: body.option,
+    rationale: (body.rationale as string | undefined) ?? '',
+    timestamp: new Date().toISOString(),
+  });
+  const key = getWorkerKeys(workerDid).RESULT;
+  try {
+    await getEnsueClient().updateMemory(key, voteValue);
+  } catch (error) {
+    return c.json(
+      {
+        error: 'Failed to write vote to Ensue',
+        details: error instanceof Error ? error.message : 'Unknown error',
+      },
+      502,
+    );
+  }
+
+  return c.json({
+    status: 'ok',
+    worker_did: workerDid,
+    key,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 export default app;
